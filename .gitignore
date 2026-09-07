@@ -6,3 +6,6 @@ dist/
 .env
 .env.*
 !.env.example
+# Local npm config may contain registry tokens — never commit it.
+.npmrc
+!.npmrc.example

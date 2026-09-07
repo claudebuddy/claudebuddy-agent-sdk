@@ -545,6 +545,16 @@ export class QueryEngine {
         continue
       }
       const toolName = result.tool_name || ''
+      // Whitelist: if enabledFor is provided and non-empty, only listed tools spill.
+      if (policy.enabledFor && policy.enabledFor.length > 0) {
+        const inWhitelist = policy.enabledFor.some(
+          (n) => toolName === n || toolName.toLowerCase().includes(n.toLowerCase()),
+        )
+        if (!inWhitelist) {
+          out.push(result)
+          continue
+        }
+      }
       if (shouldNeverSpill(toolName, policy.neverSpillTools)) {
         out.push(result)
         continue

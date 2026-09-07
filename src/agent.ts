@@ -245,6 +245,21 @@ export class Agent {
   ): AsyncGenerator<SDKMessage, void> {
     await this.setupDone
 
+    // Goal auto-takeover: when configured with goal.enabledOnQuery and the
+    // prompt is a plain string goal, route this query through the goal-driven
+    // loop instead of a single turn. Non-string prompts (message arrays) are
+    // always handled as a normal single-turn query.
+    const goalOpts = typeof this.cfg.goal === 'object' ? this.cfg.goal : undefined
+    const overrideGoal = typeof overrides?.goal === 'object' ? overrides.goal : undefined
+    // Explicit override (e.g. runGoal disabling re-entry) wins over the config.
+    const autoGoalFlag = overrideGoal?.enabledOnQuery !== undefined
+      ? overrideGoal.enabledOnQuery
+      : (goalOpts?.enabledOnQuery ?? false)
+    if (autoGoalFlag && typeof prompt === 'string') {
+      yield* this.runGoal(prompt, {})
+      return
+    }
+
     const opts = { ...this.cfg, ...overrides }
     const cwd = opts.cwd || process.cwd()
 
@@ -458,6 +473,11 @@ export class Agent {
           buildGoalSystemPrompt(goal, maxRounds),
         ].filter(Boolean).join('\n\n'),
         maxTurns: turnsPerRound,
+        // Never re-enter the goal guard from inside a goal round.
+        goal: {
+          ...(typeof this.cfg.goal === 'object' ? this.cfg.goal : {}),
+          enabledOnQuery: false,
+        },
       }
 
       for await (const ev of this.query(roundTarget, roundOverrides)) {

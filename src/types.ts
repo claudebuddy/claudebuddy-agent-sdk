@@ -471,6 +471,11 @@ export interface AgentOptions {
     previewBytes?: number
     /** 永不落盘的工具名（如 read，避免 read->spill->read 循环） */
     neverSpillTools?: string[]
+    /**
+     * 只对这些工具启用落盘（白名单）。若提供非空数组，则仅列表中
+     * 的工具超限时才会 spill，其余工具走内联截断。
+     */
+    enabledFor?: string[]
     /** 落盘目录（默认 <cwd>/.spill） */
     spillDir?: string
   }
@@ -482,6 +487,11 @@ export interface AgentOptions {
   goal?: {
     /** 是否启用目标驱动循环（默认 false） */
     enabled?: boolean
+    /**
+     * 当 query() 收到一个字符串 prompt 时，自动以该 prompt 为目标进入
+     * goal 驱动的自治循环（等价于显式调用 runGoal）。默认 false。
+     */
+    enabledOnQuery?: boolean
     /** 最大目标轮次，超过则强制停止（默认 10） */
     maxGoalRounds?: number
     /** 连续 N 轮无进展即视为受阻停止（可选） */

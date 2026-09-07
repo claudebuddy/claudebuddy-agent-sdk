@@ -268,6 +268,22 @@ export {
 export type { AutoCompactState } from './utils/compact.js'
 
 // --------------------------------------------------------------------------
+// Spill (overflow off to disk)
+// --------------------------------------------------------------------------
+
+export {
+  SpillStore,
+  applySpillPolicy,
+  buildPreview,
+  shouldNeverSpill,
+} from './utils/spill.js'
+export type {
+  SpillEntry,
+  SpillStoreOptions,
+  SpillPolicyOptions,
+} from './utils/spill.js'
+
+// --------------------------------------------------------------------------
 // Retry Logic
 // --------------------------------------------------------------------------
 
@@ -336,6 +352,16 @@ export {
 export {
   setDeferredTools,
 } from './tools/tool-search.js'
+
+// --------------------------------------------------------------------------
+// Goal-driven loop (internal update_goal tool)
+// --------------------------------------------------------------------------
+
+export {
+  createUpdateGoalTool,
+  buildGoalSystemPrompt,
+} from './tools/update-goal.js'
+export type { GoalReport } from './tools/update-goal.js'
 
 export {
   setMcpConnections,

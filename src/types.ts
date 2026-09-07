@@ -460,6 +460,35 @@ export interface AgentOptions {
     input: number
     output: number
   }
+  /**
+   * Spill 溢出配置：超长工具结果落盘，head/tail 预览 + locator 替换，
+   * 避免超大工具输出撑爆上下文。
+   */
+  spill?: {
+    /** 工具结果超过该字节数即落盘（默认 20000） */
+    maxInlineBytes?: number
+    /** 给模型的 head/tail 预览字节数（默认 4000） */
+    previewBytes?: number
+    /** 永不落盘的工具名（如 read，避免 read->spill->read 循环） */
+    neverSpillTools?: string[]
+    /** 落盘目录（默认 <cwd>/.spill） */
+    spillDir?: string
+  }
+  /**
+   * Goal 目标驱动循环：给一个目标让 agent 一直执行到完成/受阻。
+   * agent 空闲且无新输入时自动注入 continuation，完成判定交给
+   * `update_goal` 工具，`maxGoalRounds` 防止无限循环。
+   */
+  goal?: {
+    /** 是否启用目标驱动循环（默认 false） */
+    enabled?: boolean
+    /** 最大目标轮次，超过则强制停止（默认 10） */
+    maxGoalRounds?: number
+    /** 连续 N 轮无进展即视为受阻停止（可选） */
+    maxConsecutiveStalls?: number
+    /** 每个目标轮次内部的最大 turn 数（默认继承 maxTurns） */
+    turnsPerRound?: number
+  } | boolean
 }
 
 export interface QueryResult {
@@ -505,4 +534,6 @@ export interface QueryEngineConfig {
     input: number
     output: number
   }
+  /** Spill overflow configuration passed to the engine. */
+  spill?: NonNullable<AgentOptions['spill']>
 }

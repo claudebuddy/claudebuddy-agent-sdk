@@ -44,6 +44,12 @@ import {
 } from './utils/retry.js'
 import { getSystemContext, getUserContext } from './utils/context.js'
 import { normalizeMessagesForAPI } from './utils/messages.js'
+import {
+  SpillStore,
+  applySpillPolicy,
+  shouldNeverSpill,
+  type SpillEntry,
+} from './utils/spill.js'
 import type { HookRegistry, HookInput, HookOutput } from './hooks.js'
 
 // ============================================================================
@@ -150,6 +156,7 @@ export class QueryEngine {
   private sessionId: string
   private apiTimeMs = 0
   private hookRegistry?: HookRegistry
+  private spillStore?: SpillStore
 
   constructor(config: QueryEngineConfig) {
     this.config = config
@@ -157,6 +164,9 @@ export class QueryEngine {
     this.compactState = createAutoCompactState()
     this.sessionId = config.sessionId || crypto.randomUUID()
     this.hookRegistry = config.hookRegistry
+    if (config.spill) {
+      this.spillStore = new SpillStore({ spillDir: config.spill.spillDir })
+    }
   }
 
   /**
@@ -398,8 +408,11 @@ export class QueryEngine {
       // Execute tools (concurrent read-only, serial mutations)
       const toolResults = await this.executeTools(toolUseBlocks)
 
+      // Apply spill policy to large tool results before they enter context.
+      const spilled = this.spillStore ? await this.applySpillToResults(toolResults) : toolResults
+
       // Yield tool results
-      for (const result of toolResults) {
+      for (const result of spilled) {
         yield {
           type: 'tool_result',
           result: {
@@ -416,7 +429,7 @@ export class QueryEngine {
       // Add tool results to conversation
       this.messages.push({
         role: 'user',
-        content: toolResults.map((r) => ({
+        content: spilled.map((r) => ({
           type: 'tool_result' as const,
           tool_use_id: r.tool_use_id,
           content:
@@ -511,6 +524,51 @@ export class QueryEngine {
     }
 
     return results
+  }
+
+  /**
+   * Apply the spill policy to each tool result that exceeds the inline cap.
+   * Best-effort: a spill failure leaves the original content untouched and
+   * never turns a success into an error. Reading tools are skipped to avoid a
+   * read -> spill -> read loop.
+   */
+  private async applySpillToResults(
+    results: (ToolResult & { tool_name?: string })[],
+  ): Promise<(ToolResult & { tool_name?: string })[]> {
+    const policy = this.config.spill
+    if (!policy || !this.spillStore) return results
+
+    const out: (ToolResult & { tool_name?: string })[] = []
+    for (const result of results) {
+      if (result.is_error) {
+        out.push(result)
+        continue
+      }
+      const toolName = result.tool_name || ''
+      if (shouldNeverSpill(toolName, policy.neverSpillTools)) {
+        out.push(result)
+        continue
+      }
+      if (typeof result.content !== 'string') {
+        out.push(result)
+        continue
+      }
+
+      const applied = await applySpillPolicy(result.content, this.spillStore, {
+        maxInlineBytes: policy.maxInlineBytes,
+        previewBytes: policy.previewBytes,
+      })
+
+      if (applied.kind === 'spill') {
+        // Keep the original content accessible for fidelity tools but swap the
+        // model-visible string to the preview + locator.
+        out.push({ ...result, content: applied.content })
+      } else {
+        // keep or failed: unchanged (best-effort, never lose data)
+        out.push({ ...result, content: applied.content })
+      }
+    }
+    return out
   }
 
   /**

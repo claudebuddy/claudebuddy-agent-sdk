@@ -40,6 +40,12 @@ import { createHookRegistry, type HookRegistry } from './hooks.js'
 import { initBundledSkills } from './skills/index.js'
 import { createProvider, type LLMProvider, type ApiType } from './providers/index.js'
 import type { NormalizedMessageParam } from './providers/types.js'
+import {
+  createUpdateGoalTool,
+  buildGoalSystemPrompt,
+  getGoalState,
+  resetGoalState,
+} from './tools/update-goal.js'
 
 // --------------------------------------------------------------------------
 // Agent class
@@ -317,6 +323,7 @@ export class Agent {
       sessionId: this.sid,
       contextWindowSize: opts.contextWindowSize,
       pricingPerMillion: opts.pricingPerMillion,
+      spill: opts.spill,
     })
     this.currentEngine = engine
 
@@ -391,6 +398,108 @@ export class Agent {
       duration_ms: Math.round(performance.now() - t0),
       messages: [...this.messageLog],
     }
+  }
+
+  /**
+   * Goal-driven autonomous loop.
+   *
+   * Runs the agent toward `goal` over up to `maxRounds` rounds. Unlike a single
+   * `query`, the agent keeps working ("give it a task and let it run until done")
+   * and only stops when:
+   *  - it calls the injected `update_goal` tool with goal_status="complete", or
+   *  - it reports goal_status="blocked", or
+   *  - `maxRounds` is exhausted (returns with a helpful error event), or
+   *  - it is aborted.
+   *
+   * The `update_goal` internal tool is injected into the tool pool and a
+   * goal-mode system prompt is appended, so the agent knows it should keep
+   * working autonomously and how to signal completion.
+   */
+  async *runGoal(
+    goal: string,
+    overrides?: { maxGoalRounds?: number; turnsPerRound?: number },
+  ): AsyncGenerator<SDKMessage, void> {
+    const goalOpts = this.cfg.goal
+    const maxRounds = overrides?.maxGoalRounds ??
+      (typeof goalOpts === 'object' ? goalOpts.maxGoalRounds : undefined) ??
+      10
+    const turnsPerRound = overrides?.turnsPerRound ??
+      (typeof goalOpts === 'object' ? goalOpts.turnsPerRound : undefined)
+    const maxConsecutiveStalls = typeof goalOpts === 'object'
+      ? goalOpts.maxConsecutiveStalls
+      : undefined
+
+    // Reset the shared goal-state record for this run.
+    resetGoalState()
+
+    // Inject the internal update_goal tool and the goal-mode system prompt.
+    const goalTool = createUpdateGoalTool()
+    // Build a base tool pool: if the caller restricts tools, respect it; else
+    // use the agent's resolved pool. Always append the internal tool.
+    const baseTools: ToolDefinition[] = this.toolPool
+    const toolOverrides: Partial<AgentOptions> = {
+      tools: [...baseTools, goalTool],
+    }
+
+    // Track consecutive rounds without a status update (stall detection).
+    let lastRevision = getGoalState().revision
+    let consecutiveStalls = 0
+
+    let roundsDone = 0
+    for (; roundsDone < maxRounds; roundsDone++) {
+      const roundTarget = roundsDone === 0
+        ? goal
+        : `Continue working toward the goal. Stay on task and do not stop until the goal is complete or you are truly blocked. Call update_goal with goal_status="complete" when done.`
+
+      const roundOverrides: Partial<AgentOptions> = {
+        ...toolOverrides,
+        appendSystemPrompt: [
+          this.cfg.appendSystemPrompt,
+          buildGoalSystemPrompt(goal, maxRounds),
+        ].filter(Boolean).join('\n\n'),
+        maxTurns: turnsPerRound,
+      }
+
+      for await (const ev of this.query(roundTarget, roundOverrides)) {
+        yield ev
+      }
+
+      const state = getGoalState()
+      // If the model reported complete/blocked, stop.
+      if (state.revision > lastRevision) {
+        consecutiveStalls = 0
+        if (state.status === 'complete' || state.status === 'blocked') {
+          yield {
+            type: 'result',
+            subtype: state.status === 'complete' ? 'success' : 'goal_blocked',
+            num_turns: roundsDone + 1,
+            errors: state.status === 'blocked' ? [state.summary || 'Goal blocked'] : undefined,
+          } as SDKMessage
+          return
+        }
+        lastRevision = state.revision
+      } else {
+        // No status update this round.
+        consecutiveStalls++
+        if (maxConsecutiveStalls && consecutiveStalls >= maxConsecutiveStalls) {
+          yield {
+            type: 'result',
+            subtype: 'goal_blocked',
+            num_turns: roundsDone + 1,
+            errors: [`No progress reported for ${consecutiveStalls} consecutive rounds.`],
+          } as SDKMessage
+          return
+        }
+      }
+    }
+
+    // Rounds exhausted without completion.
+    yield {
+      type: 'result',
+      subtype: 'error_max_rounds',
+      num_turns: roundsDone,
+      errors: [`Goal not completed after ${maxRounds} rounds.`],
+    } as SDKMessage
   }
 
   /**

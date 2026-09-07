@@ -8,15 +8,15 @@
     "name": "LuckyGJX",
     "url": "https://github.com/LuckyGJX"
   },
-  "homepage": "https://github.com/LuckyGJX/claudebuddy-agent-sdk",
+  "homepage": "https://github.com/claudebuddy/claudebuddy-agent-sdk",
   "repository": {
     "type": "git",
-    "url": "https://github.com/LuckyGJX/claudebuddy-agent-sdk.git"
+    "url": "https://github.com/claudebuddy/claudebuddy-agent-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/LuckyGJX/claudebuddy-agent-sdk/issues"
+    "url": "https://github.com/claudebuddy/claudebuddy-agent-sdk/issues"
   },
-  "version": "0.2.4",
+  "version": "0.2.6",
   "description": "Open-source Agent SDK. Runs the full agent loop in-process — no local CLI required. Deploy anywhere: cloud, serverless, Docker, CI/CD.",
   "type": "module",
   "main": "./dist/index.js",

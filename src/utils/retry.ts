@@ -125,7 +125,7 @@ export function isRateLimitError(err: any): boolean {
  */
 export function formatApiError(err: any): string {
   if (isAuthError(err)) {
-    return 'Authentication failed. Check your CLAUDEBUDDY_API_KEY (or legacy CODEANY_API_KEY).'
+    return 'Authentication failed. Check your CLAUDEBUDDY_API_KEY.'
   }
   if (isRateLimitError(err)) {
     return 'Rate limit exceeded. Please retry after a short wait.'

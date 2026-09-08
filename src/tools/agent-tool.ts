@@ -102,11 +102,10 @@ export const AgentTool: ToolDefinition = {
       'You are a helpful assistant. Complete the given task using the available tools.'
 
     // Inherit provider and model from parent agent context, fall back to env vars.
-// Prefer the new CLAUDEBUDDY_ prefix, then the legacy CODEANY_ prefix.
-    const envModel = process.env.CLAUDEBUDDY_MODEL ?? process.env.CODEANY_MODEL
-    const envApiType = process.env.CLAUDEBUDDY_API_TYPE ?? process.env.CODEANY_API_TYPE
-    const envApiKey = process.env.CLAUDEBUDDY_API_KEY ?? process.env.CODEANY_API_KEY
-    const envBaseUrl = process.env.CLAUDEBUDDY_BASE_URL ?? process.env.CODEANY_BASE_URL
+    const envModel = process.env.CLAUDEBUDDY_MODEL
+    const envApiType = process.env.CLAUDEBUDDY_API_TYPE
+    const envApiKey = process.env.CLAUDEBUDDY_API_KEY
+    const envBaseUrl = process.env.CLAUDEBUDDY_BASE_URL
     const subModel = input.model || context.model || envModel || 'claude-sonnet-4-6'
     const provider = context.provider ?? createProvider(
       (context.apiType || envApiType as ApiType) || 'anthropic-messages',

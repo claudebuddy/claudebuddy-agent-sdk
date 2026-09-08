@@ -152,7 +152,7 @@ export class Agent {
     return 'anthropic-messages'
   }
 
-  /** Pick API key and base URL from options or CLAUDEBUDDY/CODEANY env vars. */
+  /** Pick API key and base URL from options or CLAUDEBUDDY_* env vars. */
   private pickCredentials(): { key?: string; baseUrl?: string } {
     return {
       key:
@@ -169,21 +169,16 @@ export class Agent {
   }
 
   /**
-   * Read an env var by its short key. Prefers the new `CLAUDEBUDDY_` prefix
-   * and falls back to the legacy `CODEANY_` prefix, so existing configs keep
-   * working. e.g. readEnv('MODEL') checks CLAUDEBUDDY_MODEL then CODEANY_MODEL.
+   * Read an env var by its short key using the CLAUDEBUDDY_ prefix.
+   * e.g. readEnv('MODEL') checks CLAUDEBUDDY_MODEL.
    */
   private readEnv(shortKey: string): string | undefined {
-    const claudebuddy = process.env[`CLAUDEBUDDY_${shortKey}`]
-    if (claudebuddy) return claudebuddy
-    return process.env[`CODEANY_${shortKey}`] || undefined
+    return process.env[`CLAUDEBUDDY_${shortKey}`] || undefined
   }
 
-  /** Read a value from the options `env` map with both new/legacy prefixes. */
+  /** Read a value from the options `env` map using the CLAUDEBUDDY_ prefix. */
   private envMapValue(shortKey: string): string | undefined {
-    const map = this.cfg.env
-    if (!map) return undefined
-    return map[`CLAUDEBUDDY_${shortKey}`] ?? map[`CODEANY_${shortKey}`]
+    return this.cfg.env?.[`CLAUDEBUDDY_${shortKey}`]
   }
 
   /** Assemble the available tool set based on options. */

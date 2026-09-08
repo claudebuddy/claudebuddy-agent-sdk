@@ -348,7 +348,7 @@ export interface AgentOptions {
   model?: string
   /**
    * API type: 'anthropic-messages' or 'openai-completions'.
-   * Falls back to CLAUDEBUDDY_API_TYPE (legacy CODEANY_API_TYPE) env var. Default: 'anthropic-messages'.
+   * Falls back to CLAUDEBUDDY_API_TYPE env var. Default: 'anthropic-messages'.
    */
   apiType?: import('./providers/types.js').ApiType
   /** API key. Falls back to CLAUDEBUDDY_API_KEY env var. */

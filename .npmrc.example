@@ -1,5 +1,9 @@
-# GitHub Packages registry mapping + token placeholder.
-# Copy this file to `.npmrc` and export GITHUB_TOKEN in your environment.
+# npm registry mapping.
+# The package @claudebuddy/claudebuddy-agent-sdk publishes to npmjs by default
+# (npmjs is the public registry — no token needed to install from it).
+#
+# Optional: to ALSO install from/publish to GitHub Packages, add:
+#   @claudebuddy:registry=https://npm.pkg.github.com/
+#   //npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}
+#
 # NEVER commit a real token — keep using the ${GITHUB_TOKEN} placeholder.
-@claudebuddy:registry=https://npm.pkg.github.com/
-//npm.pkg.github.com/:_authToken=${GITHUB_TOKEN}

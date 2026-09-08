@@ -73,7 +73,7 @@ export class Agent {
 
     // Merge credentials from options.env map, direct options, and process.env
     this.apiCredentials = this.pickCredentials()
-    this.modelId = this.cfg.model ?? this.readEnv('CODEANY_MODEL') ?? 'claude-sonnet-4-6'
+    this.modelId = this.cfg.model ?? this.readEnv('MODEL') ?? 'claude-sonnet-4-6'
     this.sid = this.cfg.sessionId ?? crypto.randomUUID()
 
     // Resolve API type
@@ -126,8 +126,8 @@ export class Agent {
 
     // Env var
     const envType =
-      this.cfg.env?.CODEANY_API_TYPE ??
-      this.readEnv('CODEANY_API_TYPE')
+      this.envMapValue('API_TYPE') ??
+      this.readEnv('API_TYPE')
     if (envType === 'openai-completions' || envType === 'anthropic-messages') {
       return envType
     }
@@ -152,26 +152,38 @@ export class Agent {
     return 'anthropic-messages'
   }
 
-  /** Pick API key and base URL from options or CODEANY_* env vars. */
+  /** Pick API key and base URL from options or CLAUDEBUDDY/CODEANY env vars. */
   private pickCredentials(): { key?: string; baseUrl?: string } {
-    const envMap = this.cfg.env
     return {
       key:
         this.cfg.apiKey ??
-        envMap?.CODEANY_API_KEY ??
-        envMap?.CODEANY_AUTH_TOKEN ??
-        this.readEnv('CODEANY_API_KEY') ??
-        this.readEnv('CODEANY_AUTH_TOKEN'),
+        this.envMapValue('API_KEY') ??
+        this.envMapValue('AUTH_TOKEN') ??
+        this.readEnv('API_KEY') ??
+        this.readEnv('AUTH_TOKEN'),
       baseUrl:
         this.cfg.baseURL ??
-        envMap?.CODEANY_BASE_URL ??
-        this.readEnv('CODEANY_BASE_URL'),
+        this.envMapValue('BASE_URL') ??
+        this.readEnv('BASE_URL'),
     }
   }
 
-  /** Read a value from process.env (returns undefined if missing). */
-  private readEnv(key: string): string | undefined {
-    return process.env[key] || undefined
+  /**
+   * Read an env var by its short key. Prefers the new `CLAUDEBUDDY_` prefix
+   * and falls back to the legacy `CODEANY_` prefix, so existing configs keep
+   * working. e.g. readEnv('MODEL') checks CLAUDEBUDDY_MODEL then CODEANY_MODEL.
+   */
+  private readEnv(shortKey: string): string | undefined {
+    const claudebuddy = process.env[`CLAUDEBUDDY_${shortKey}`]
+    if (claudebuddy) return claudebuddy
+    return process.env[`CODEANY_${shortKey}`] || undefined
+  }
+
+  /** Read a value from the options `env` map with both new/legacy prefixes. */
+  private envMapValue(shortKey: string): string | undefined {
+    const map = this.cfg.env
+    if (!map) return undefined
+    return map[`CLAUDEBUDDY_${shortKey}`] ?? map[`CODEANY_${shortKey}`]
   }
 
   /** Assemble the available tool set based on options. */

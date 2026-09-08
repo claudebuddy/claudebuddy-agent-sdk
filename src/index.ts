@@ -1,8 +1,8 @@
 /**
- * @codeany/open-agent-sdk
+ * @claudebuddy/claudebuddy-agent-sdk
  *
- * Open-source Agent SDK by CodeAny (https://codeany.ai).
- * Runs the full agent loop in-process without spawning subprocesses.
+ * Open-source Agent SDK that runs the full agent loop in-process without
+ * spawning subprocesses.
  *
  * Features:
  * - 30+ built-in tools (file I/O, shell, web, agents, tasks, teams, etc.)

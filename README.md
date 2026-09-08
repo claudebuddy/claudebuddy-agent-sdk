@@ -17,7 +17,7 @@ npm install @codeany/open-agent-sdk
 Set your API key:
 
 ```bash
-export CODEANY_API_KEY=your-api-key
+export CLAUDEBUDDY_API_KEY=your-api-key
 ```
 
 ### OpenAI-compatible models
@@ -25,18 +25,18 @@ export CODEANY_API_KEY=your-api-key
 Works with OpenAI, DeepSeek, Qwen, Mistral, or any OpenAI-compatible endpoint:
 
 ```bash
-export CODEANY_API_TYPE=openai-completions
-export CODEANY_API_KEY=sk-...
-export CODEANY_BASE_URL=https://api.openai.com/v1
-export CODEANY_MODEL=gpt-4o
+export CLAUDEBUDDY_API_TYPE=openai-completions
+export CLAUDEBUDDY_API_KEY=sk-...
+export CLAUDEBUDDY_BASE_URL=https://api.openai.com/v1
+export CLAUDEBUDDY_MODEL=gpt-4o
 ```
 
 ### Third-party Anthropic-compatible providers
 
 ```bash
-export CODEANY_BASE_URL=https://openrouter.ai/api
-export CODEANY_API_KEY=sk-or-...
-export CODEANY_MODEL=anthropic/claude-sonnet-4
+export CLAUDEBUDDY_BASE_URL=https://openrouter.ai/api
+export CLAUDEBUDDY_API_KEY=sk-or-...
+export CLAUDEBUDDY_MODEL=anthropic/claude-sonnet-4
 ```
 
 ## Quick start
@@ -331,7 +331,7 @@ npx tsx examples/web/server.ts
 | -------------------- | --------------------------------------- | ---------------------- | -------------------------------------------------------------------- |
 | `apiType`            | `string`                                | auto-detected          | `'anthropic-messages'` or `'openai-completions'`                     |
 | `model`              | `string`                                | `claude-sonnet-4-6`    | LLM model ID                                                         |
-| `apiKey`             | `string`                                | `CODEANY_API_KEY`      | API key                                                              |
+| `apiKey`             | `string`                                | `CLAUDEBUDDY_API_KEY`      | API key                                                              |
 | `baseURL`            | `string`                                | —                      | Custom API endpoint                                                  |
 | `cwd`                | `string`                                | `process.cwd()`        | Working directory                                                    |
 | `systemPrompt`       | `string`                                | —                      | System prompt override                                               |
@@ -362,11 +362,11 @@ npx tsx examples/web/server.ts
 
 | Variable             | Description                                              |
 | -------------------- | -------------------------------------------------------- |
-| `CODEANY_API_KEY`    | API key (required)                                       |
-| `CODEANY_API_TYPE`   | `anthropic-messages` (default) or `openai-completions`   |
-| `CODEANY_MODEL`      | Default model override                                   |
-| `CODEANY_BASE_URL`   | Custom API endpoint                                      |
-| `CODEANY_AUTH_TOKEN` | Alternative auth token                                   |
+| `CLAUDEBUDDY_API_KEY`    | API key (required)                                       |
+| `CLAUDEBUDDY_API_TYPE`   | `anthropic-messages` (default) or `openai-completions`   |
+| `CLAUDEBUDDY_MODEL`      | Default model override                                   |
+| `CLAUDEBUDDY_BASE_URL`   | Custom API endpoint                                      |
+| `CLAUDEBUDDY_AUTH_TOKEN` | Alternative auth token                                   |
 
 ## Built-in tools
 

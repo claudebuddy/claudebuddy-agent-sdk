@@ -1,12 +1,11 @@
-# Open Agent SDK (TypeScript)
+# ClaudeBuddy Agent SDK (TypeScript)
 
 [![npm version](https://img.shields.io/npm/v/@claudebuddy/claudebuddy-agent-sdk)](https://www.npmjs.com/package/@claudebuddy/claudebuddy-agent-sdk)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](./LICENSE)
 
-Open-source Agent SDK that runs the full agent loop **in-process** — no subprocess or CLI required. Supports both **Anthropic** and **OpenAI-compatible** APIs. Deploy anywhere: cloud, serverless, Docker, CI/CD.
+claudebuddy Agent SDK that runs the full agent loop **in-process** — no subprocess or CLI required. Supports both **Anthropic** and **OpenAI-compatible** APIs. Deploy anywhere: cloud, serverless, Docker, CI/CD.
 
-Also available in **Go**: [open-agent-sdk-go](https://github.com/claudebuddy/claudebuddy-agent-sdk)
 
 ## Get started
 

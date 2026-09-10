@@ -7,9 +7,9 @@
  * keep running another round.
  *
  * Because the engine faithfully executes tools and feeds the tool_result back
- * to the model, calling this tool both (a) gives the model a structured way to
- * declare task state, and (b) lets the driver read that state from the shared
- * module-level record below.
+ * to the model, calling this tool gives the model a structured way to declare task
+ * state and lets the driver read the explicit per-run report. Calls omitting
+ * a report retain the legacy module-level state.
  */
 
 import type { ToolDefinition } from '../types.js'
@@ -22,35 +22,34 @@ export interface GoalReport {
   revision: number
 }
 
-/** Module-level recorded goal state shared with the driver. */
-const goalState: GoalReport = {
-  status: 'in_progress',
-  summary: undefined,
-  revision: 0,
+/** Create an independent record for a goal run. */
+export function createGoalState(): GoalReport {
+  return { status: 'in_progress', summary: undefined, revision: 0 }
 }
+const goalState = createGoalState()
 
 /** Reset the goal record (call at the start of a runGoal). */
-export function resetGoalState(revision = 0): void {
-  goalState.status = 'in_progress'
-  goalState.summary = undefined
-  goalState.revision = revision
+export function resetGoalState(revision = 0, state: GoalReport = goalState): void {
+  state.status = 'in_progress'
+  state.summary = undefined
+  state.revision = revision
 }
 
 /** Read the latest reported goal state without consuming it. */
-export function getGoalState(): Readonly<GoalReport> {
-  return { ...goalState }
+export function getGoalState(state: GoalReport = goalState): Readonly<GoalReport> {
+  return { ...state }
 }
 
 /** Whether a report with this revision has been recorded (i.e. model spoke). */
-export function hasGoalReport(revision: number): boolean {
-  return goalState.revision > revision
+export function hasGoalReport(revision: number, state: GoalReport = goalState): boolean {
+  return state.revision > revision
 }
 
 /**
  * The internal update_goal tool definition.
  * Schema: { goal_status, summary?, error? }
  */
-export function createUpdateGoalTool(): ToolDefinition {
+export function createUpdateGoalTool(state: GoalReport = goalState): ToolDefinition {
   return {
     name: 'update_goal',
     description:
@@ -85,9 +84,9 @@ export function createUpdateGoalTool(): ToolDefinition {
         : input?.goal_status === 'blocked'
           ? 'blocked'
           : 'in_progress'
-      goalState.status = status
-      goalState.summary = input?.summary ?? input?.error ?? input?.summary ?? undefined
-      goalState.revision++
+      state.status = status
+      state.summary = input?.summary ?? input?.error ?? input?.summary ?? undefined
+      state.revision++
       const ack =
         status === 'complete'
           ? 'Goal reported complete. Well done.'

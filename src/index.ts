@@ -428,6 +428,7 @@ export type {
   QueryResult,
   ThinkingConfig,
   TokenUsage,
+  ExecutionBudget,
 
   // Engine types
   QueryEngineConfig,
@@ -450,3 +451,7 @@ export type {
   // Model info
   ModelInfo,
 } from './types.js'
+
+export { appendSessionEvent, readSessionEvents } from './session.js'
+export type { SessionEvent } from './session.js'
+export type { ProviderStreamEvent } from './providers/types.js'

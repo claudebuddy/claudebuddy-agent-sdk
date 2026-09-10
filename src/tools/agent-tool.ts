@@ -6,6 +6,7 @@
  */
 
 import type { ToolDefinition, ToolContext, ToolResult, AgentDefinition } from '../types.js'
+import { startBackgroundTask } from './task-tools.js'
 import { QueryEngine } from '../engine.js'
 import { getAllBaseTools, filterTools } from './index.js'
 import { createProvider, type ApiType } from '../providers/index.js'
@@ -83,19 +84,23 @@ export const AgentTool: ToolDefinition = {
     return 'Launch a subagent to handle complex tasks autonomously.'
   },
   async call(input: any, context: ToolContext): Promise<ToolResult> {
+    if (input.run_in_background) {
+      const task = startBackgroundTask(context, 'agent', input.description || 'Subagent', async signal => {
+        const result = await AgentTool.call({ ...input, run_in_background: false }, { ...context, abortSignal: signal })
+        return { output: typeof result.content === 'string' ? result.content : JSON.stringify(result.content), is_error: result.is_error }
+      })
+      return { type: 'tool_result', tool_use_id: '', content: JSON.stringify({ task_id: task.id, status: task.status }) }
+    }
     const agentType = input.subagent_type || 'general-purpose'
 
     // Find agent definition
-    const agentDef = registeredAgents[agentType] || BUILTIN_AGENTS[agentType]
+    const agentDef = (context.agents ?? registeredAgents)[agentType] || BUILTIN_AGENTS[agentType]
 
     // Determine tools for subagent
-    let tools = getAllBaseTools()
-    if (agentDef?.tools) {
-      tools = filterTools(tools, agentDef.tools)
-    }
+    let tools = filterTools(context.tools ?? getAllBaseTools(), agentDef?.tools, agentDef?.disallowedTools)
 
     // Remove AgentTool from subagent to prevent infinite recursion
-    tools = tools.filter(t => t.name !== 'Agent')
+    tools = tools.filter(t => t.name !== 'Agent' && t.name !== 'update_goal')
 
     // Build system prompt
     const systemPrompt = agentDef?.prompt ||
@@ -106,7 +111,8 @@ export const AgentTool: ToolDefinition = {
     const envApiType = process.env.CLAUDEBUDDY_API_TYPE
     const envApiKey = process.env.CLAUDEBUDDY_API_KEY
     const envBaseUrl = process.env.CLAUDEBUDDY_BASE_URL
-    const subModel = input.model || context.model || envModel || 'claude-sonnet-4-6'
+    const requestedModel = input.model || agentDef?.model
+    const subModel = (requestedModel === 'inherit' ? undefined : requestedModel) || context.model || envModel || 'claude-sonnet-4-6'
     const provider = context.provider ?? createProvider(
       (context.apiType || envApiType as ApiType) || 'anthropic-messages',
       {
@@ -124,16 +130,30 @@ export const AgentTool: ToolDefinition = {
       systemPrompt,
       maxTurns: agentDef?.maxTurns || 10,
       maxTokens: 16384,
-      canUseTool: async () => ({ behavior: 'allow' }),
+      canUseTool: context.canUseTool ?? (async () => ({ behavior: 'allow' })),
+      abortSignal: context.abortSignal,
+      sessionState: context.sessionState,
+      agents: context.agents,
+      maxBudgetUsd: context.maxBudgetUsd,
+      executionBudget: context.executionBudget,
+      pricingPerMillion: context.pricingPerMillion,
+      hookRegistry: context.hookRegistry,
+      sessionId: context.sessionId,
       includePartialMessages: false,
     })
 
     // Run the subagent
     let resultText = ''
+    let isError = false
+    let failureReason = ''
     let toolCalls: string[] = []
 
     try {
       for await (const event of engine.submitMessage(input.prompt)) {
+        if (event.type === 'result' && event.is_error) {
+          isError = true
+          failureReason = event.subtype
+        }
         if (event.type === 'assistant') {
           for (const block of event.message.content) {
             if ('text' in block && block.text) {
@@ -154,7 +174,9 @@ export const AgentTool: ToolDefinition = {
       }
     }
 
-    const output = resultText || '(Subagent completed with no text output)'
+    const output = isError
+      ? `Subagent error: ${failureReason}${resultText ? `\n${resultText}` : ''}`
+      : resultText || '(Subagent completed with no text output)'
     const toolSummary = toolCalls.length > 0
       ? `\n[Tools used: ${toolCalls.join(', ')}]`
       : ''
@@ -163,6 +185,7 @@ export const AgentTool: ToolDefinition = {
       type: 'tool_result',
       tool_use_id: '',
       content: output + toolSummary,
+      is_error: isError,
     }
   },
 }

@@ -12,6 +12,7 @@
  * 8. Retry with exponential backoff on transient errors
  */
 
+import { settleTaskGroup, type Task } from './tools/task-tools.js'
 import type {
   SDKMessage,
   QueryEngineConfig,
@@ -19,6 +20,7 @@ import type {
   ToolResult,
   ToolContext,
   TokenUsage,
+  ExecutionBudget,
 } from './types.js'
 import type {
   LLMProvider,
@@ -27,9 +29,7 @@ import type {
   NormalizedTool,
 } from './providers/types.js'
 import {
-  estimateMessagesTokens,
   estimateCost,
-  getAutoCompactThreshold,
 } from './utils/tokens.js'
 import {
   shouldAutoCompact,
@@ -48,7 +48,6 @@ import {
   SpillStore,
   applySpillPolicy,
   shouldNeverSpill,
-  type SpillEntry,
 } from './utils/spill.js'
 import type { HookRegistry, HookInput, HookOutput } from './hooks.js'
 
@@ -149,17 +148,25 @@ export class QueryEngine {
   private config: QueryEngineConfig
   private provider: LLMProvider
   public messages: NormalizedMessageParam[] = []
-  private totalUsage: TokenUsage = { input_tokens: 0, output_tokens: 0 }
-  private totalCost = 0
+  private ledger: ExecutionBudget
+  private initialUsage: TokenUsage
+  private initialCost: number
+  private initialModelUsage: Record<string, TokenUsage> = {}
   private turnCount = 0
   private compactState: AutoCompactState
   private sessionId: string
+  private taskGroup = new Set<string>()
   private apiTimeMs = 0
   private hookRegistry?: HookRegistry
   private spillStore?: SpillStore
 
   constructor(config: QueryEngineConfig) {
+    config.tools = config.tools.filter(tool => tool.isEnabled?.() !== false)
     this.config = config
+    this.ledger = config.executionBudget ?? { cost: 0, usage: { input_tokens: 0, output_tokens: 0 } }
+    this.initialUsage = { ...this.ledger.usage }
+    this.initialCost = this.ledger.cost
+    config.sessionState ??= new Map()
     this.provider = config.provider
     this.compactState = createAutoCompactState()
     this.sessionId = config.sessionId || crypto.randomUUID()
@@ -197,330 +204,218 @@ export class QueryEngine {
   async *submitMessage(
     prompt: string | any[],
   ): AsyncGenerator<SDKMessage> {
-    // Hook: SessionStart
-    await this.executeHooks('SessionStart')
-
-    // Hook: UserPromptSubmit
-    const userHookResults = await this.executeHooks('UserPromptSubmit', {
-      toolInput: prompt,
-    })
-    // Check if any hook blocks the submission
-    if (userHookResults.some((r) => r.block)) {
-      yield {
-        type: 'result',
-        subtype: 'error_during_execution',
-        is_error: true,
-        usage: this.totalUsage,
-        num_turns: 0,
-        cost: 0,
-        errors: ['Blocked by UserPromptSubmit hook'],
-      }
-      return
-    }
-
-    // Add user message
-    this.messages.push({ role: 'user', content: prompt as any })
-
-    // Build tool definitions for provider
-    const tools = this.config.tools.map(toProviderTool)
-
-    // Build system prompt
-    const systemPrompt = await buildSystemPrompt(this.config)
-
-    // Emit init system message
-    yield {
-      type: 'system',
-      subtype: 'init',
-      session_id: this.sessionId,
-      tools: this.config.tools.map(t => t.name),
-      model: this.config.model,
-      cwd: this.config.cwd,
-      mcp_servers: [],
-      permission_mode: 'bypassPermissions',
-    } as SDKMessage
-
-    // Agentic loop
-    let turnsRemaining = this.config.maxTurns
-    let budgetExceeded = false
-    let maxOutputRecoveryAttempts = 0
-    const MAX_OUTPUT_RECOVERY = 3
-
-    while (turnsRemaining > 0) {
-      if (this.config.abortSignal?.aborted) break
-
-      // Check budget
-      if (this.config.maxBudgetUsd && this.totalCost >= this.config.maxBudgetUsd) {
-        budgetExceeded = true
-        break
-      }
-
-      // Auto-compact if context is too large
-      if (shouldAutoCompact(
-        this.messages as any[],
-        this.config.model,
-        this.compactState,
-        this.config.contextWindowSize,
-      )) {
-        await this.executeHooks('PreCompact')
-        try {
-          const result = await compactConversation(
-            this.provider,
-            this.config.model,
-            this.messages as any[],
-            this.compactState,
-          )
-          this.messages = result.compactedMessages as NormalizedMessageParam[]
-          this.compactState = result.state
-          await this.executeHooks('PostCompact')
-        } catch {
-          // Continue with uncompacted messages
-        }
-      }
-
-      // Micro-compact: truncate large tool results
-      const apiMessages = microCompactMessages(
-        normalizeMessagesForAPI(this.messages as any[]),
-      ) as NormalizedMessageParam[]
-
-      this.turnCount++
-      turnsRemaining--
-
-      // Make API call with retry via provider
-      let response: CreateMessageResponse
-      const apiStart = performance.now()
-      try {
-        response = await withRetry(
-          async () => {
-            return this.provider.createMessage({
-              model: this.config.model,
-              maxTokens: this.config.maxTokens,
-              system: systemPrompt,
-              messages: apiMessages,
-              tools: tools.length > 0 ? tools : undefined,
-              thinking:
-                this.config.thinking?.type === 'enabled' &&
-                this.config.thinking.budgetTokens
-                  ? {
-                      type: 'enabled',
-                      budget_tokens: this.config.thinking.budgetTokens,
-                    }
-                  : undefined,
-            })
-          },
-          undefined,
-          this.config.abortSignal,
-        )
-      } catch (err: any) {
-        // Handle prompt-too-long by compacting
-        if (isPromptTooLongError(err) && !this.compactState.compacted) {
-          try {
-            const result = await compactConversation(
-              this.provider,
-              this.config.model,
-              this.messages as any[],
-              this.compactState,
-            )
-            this.messages = result.compactedMessages as NormalizedMessageParam[]
-            this.compactState = result.state
-            turnsRemaining++ // Retry this turn
-            this.turnCount--
-            continue
-          } catch {
-            // Can't compact, give up
-          }
-        }
-
-        const message = err?.message ? String(err.message) : String(err)
-
-        yield {
-          type: 'result',
-          subtype: 'error',
-          usage: this.totalUsage,
-          num_turns: this.turnCount,
-          cost: this.totalCost,
-          errors: [message],
-        }
-        return
-      }
-
-      // Track API timing
-      this.apiTimeMs += performance.now() - apiStart
-
-      // Track usage (normalized by provider)
-      if (response.usage) {
-        this.totalUsage.input_tokens += response.usage.input_tokens
-        this.totalUsage.output_tokens += response.usage.output_tokens
-        if (response.usage.cache_creation_input_tokens) {
-          this.totalUsage.cache_creation_input_tokens =
-            (this.totalUsage.cache_creation_input_tokens || 0) +
-            response.usage.cache_creation_input_tokens
-        }
-        if (response.usage.cache_read_input_tokens) {
-          this.totalUsage.cache_read_input_tokens =
-            (this.totalUsage.cache_read_input_tokens || 0) +
-            response.usage.cache_read_input_tokens
-        }
-        this.totalCost += estimateCost(
-          this.config.model,
-          response.usage,
-          this.config.pricingPerMillion,
-        )
-      }
-
-      // Add assistant message to conversation
-      this.messages.push({ role: 'assistant', content: response.content as any })
-
-      // Yield assistant message
-      yield {
-        type: 'assistant',
-        message: {
-          role: 'assistant',
-          content: response.content as any,
-        },
-      }
-
-      // Handle max_output_tokens recovery
-      if (
-        response.stopReason === 'max_tokens' &&
-        maxOutputRecoveryAttempts < MAX_OUTPUT_RECOVERY
-      ) {
-        maxOutputRecoveryAttempts++
-        // Add continuation prompt
-        this.messages.push({
-          role: 'user',
-          content: 'Please continue from where you left off.',
+    this.initialUsage = { ...this.ledger.usage }
+    this.initialCost = this.ledger.cost
+    this.initialModelUsage = Object.fromEntries(Object.entries(this.ledger.modelUsage ?? {}).map(([model, usage]) => [model, { ...usage }]))
+    this.turnCount = 0
+    this.apiTimeMs = 0
+    this.taskGroup.clear()
+    let backgroundTasks: Task[] = []
+    let status = 'error_max_turns'
+    let errors: string[] | undefined
+    let pendingTools: ToolUseBlock[] = []
+    const atBudget = () => this.config.maxBudgetUsd !== undefined && this.ledger.cost >= this.config.maxBudgetUsd
+    const compact = async () => {
+      this.config.abortSignal?.throwIfAborted()
+      await this.executeHooks('PreCompact')
+      this.config.abortSignal?.throwIfAborted()
+      const result = await compactConversation(this.provider, this.config.model,
+        this.messages, this.compactState, {
+          signal: this.config.abortSignal,
+          onUsage: usage => this.chargeUsage(usage),
         })
-        continue
-      }
-
-      // Check for tool use
-      const toolUseBlocks = response.content.filter(
-        (block): block is ToolUseBlock => block.type === 'tool_use',
-      )
-
-      if (toolUseBlocks.length === 0) {
-        break // No tool calls - agent is done
-      }
-
-      // Reset max_output recovery counter on successful tool use
-      maxOutputRecoveryAttempts = 0
-
-      // Execute tools (concurrent read-only, serial mutations)
-      const toolResults = await this.executeTools(toolUseBlocks)
-
-      // Apply spill policy to large tool results before they enter context.
-      const spilled = this.spillStore ? await this.applySpillToResults(toolResults) : toolResults
-
-      // Yield tool results
-      for (const result of spilled) {
-        yield {
-          type: 'tool_result',
-          result: {
-            tool_use_id: result.tool_use_id,
-            tool_name: result.tool_name || '',
-            output:
-              typeof result.content === 'string'
-                ? result.content
-                : JSON.stringify(result.content),
-          },
+      this.messages = result.compactedMessages
+      this.compactState = result.state
+      if (result.success) await this.executeHooks('PostCompact')
+      return result.success
+    }
+    try {
+      await this.executeHooks('SessionStart')
+      this.config.abortSignal?.throwIfAborted()
+      const userHookResults = await this.executeHooks('UserPromptSubmit', { toolInput: prompt })
+      if (userHookResults.some(r => r.block)) throw new Error('Blocked by UserPromptSubmit hook')
+      this.messages.push({ role: 'user', content: prompt as any })
+      const tools = this.config.tools.map(toProviderTool)
+      const systemPrompt = await buildSystemPrompt(this.config)
+      yield {
+        type: 'system', subtype: 'init', session_id: this.sessionId,
+        tools: this.config.tools.map(t => t.name), model: this.config.model,
+        cwd: this.config.cwd, mcp_servers: [], permission_mode: this.config.permissionMode ?? 'bypassPermissions',
+      } as SDKMessage
+      let recoveryAttempts = 0
+      let outputRecoveryAttempts = 0
+      while (this.turnCount < this.config.maxTurns) {
+        this.config.abortSignal?.throwIfAborted()
+        if (atBudget()) { status = 'error_max_budget_usd'; break }
+        if (shouldAutoCompact(this.messages, this.config.model, this.compactState, this.config.contextWindowSize)) {
+          await compact()
+        }
+        this.config.abortSignal?.throwIfAborted()
+        if (atBudget()) { status = 'error_max_budget_usd'; break }
+        const apiMessages = microCompactMessages(normalizeMessagesForAPI(this.messages)) as NormalizedMessageParam[]
+        this.turnCount++
+        let response: CreateMessageResponse
+        let emittedPartial = false
+        const apiStart = performance.now()
+        try {
+          const request = {
+            signal: this.config.abortSignal,
+            model: this.config.model, maxTokens: this.config.maxTokens,
+            system: systemPrompt, messages: apiMessages,
+            tools: tools.length ? tools : undefined,
+            thinking: this.config.thinking?.type === 'enabled' && this.config.thinking.budgetTokens
+              ? { type: 'enabled', budget_tokens: this.config.thinking.budgetTokens } : undefined,
+          }
+          if (this.config.includePartialMessages && this.provider.streamMessage) {
+            let complete: CreateMessageResponse | undefined
+            for await (const event of this.provider.streamMessage(request)) {
+              this.config.abortSignal?.throwIfAborted()
+              if (event.type === 'response') complete = event.response
+              else { emittedPartial = true; yield { type: 'partial_message', partial: event } }
+            }
+            if (!complete) throw new Error('Stream ended without a complete response')
+            response = complete
+          } else {
+            response = await withRetry(() => this.provider.createMessage(request), undefined, this.config.abortSignal)
+          }
+        } catch (err) {
+          this.config.abortSignal?.throwIfAborted()
+          if (!emittedPartial && isPromptTooLongError(err) && recoveryAttempts < 1 && !atBudget()) {
+            recoveryAttempts++
+            if (await compact()) { this.turnCount--; continue }
+          }
+          throw err
+        } finally {
+          this.apiTimeMs += performance.now() - apiStart
+        }
+        if (response.usage) this.chargeUsage(response.usage)
+        this.config.abortSignal?.throwIfAborted()
+        this.messages.push({ role: 'assistant', content: response.content })
+        pendingTools = response.content.filter((block): block is ToolUseBlock => block.type === 'tool_use')
+        yield { type: 'assistant', message: { role: 'assistant', content: response.content } }
+        this.config.abortSignal?.throwIfAborted()
+        if (pendingTools.length) {
+          if (response.stopReason === 'max_tokens') throw new Error('Tool response was truncated before completion')
+          outputRecoveryAttempts = 0
+          const results = await this.executeTools(pendingTools)
+          const spilled = this.spillStore ? await this.applySpillToResults(results) : results
+          // Persist all results before yielding so an early consumer exit preserves valid history.
+          this.messages.push({ role: 'user', content: spilled.map(r => ({
+            type: 'tool_result', tool_use_id: r.tool_use_id,
+            content: typeof r.content === 'string' ? r.content : JSON.stringify(r.content), is_error: r.is_error,
+          })) })
+          pendingTools = []
+          for (const r of spilled) yield { type: 'tool_result', result: {
+            tool_use_id: r.tool_use_id, tool_name: r.tool_name ?? '',
+            output: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
+          } }
+          this.config.abortSignal?.throwIfAborted()
+        } else if (response.stopReason === 'max_tokens') {
+          if (outputRecoveryAttempts++ >= 3) {
+            status = 'error_during_execution'; errors = ['Maximum output recovery attempts exceeded']; break
+          }
+          this.messages.push({ role: 'user', content: 'Please continue from where you left off.' })
+        } else {
+          status = 'success'; break
         }
       }
-
-      // Add tool results to conversation
-      this.messages.push({
-        role: 'user',
-        content: spilled.map((r) => ({
-          type: 'tool_result' as const,
-          tool_use_id: r.tool_use_id,
-          content:
-            typeof r.content === 'string'
-              ? r.content
-              : JSON.stringify(r.content),
-          is_error: r.is_error,
-        })),
-      })
-
-      if (response.stopReason === 'end_turn') break
+      this.config.abortSignal?.throwIfAborted()
+      if (status === 'error_max_turns' && atBudget()) status = 'error_max_budget_usd'
+    } catch (err: any) {
+      status = this.config.abortSignal?.aborted ? 'cancelled' : 'error_during_execution'
+      errors = [err?.message ? String(err.message) : String(err)]
+    } finally {
+      if (pendingTools.length) {
+        this.messages.push({ role: 'user', content: pendingTools.map(block => ({
+          type: 'tool_result', tool_use_id: block.id,
+          content: 'Tool execution interrupted before a result was recorded.', is_error: true,
+        })) })
+      }
+      backgroundTasks = await settleTaskGroup(this.taskGroup, this.config.sessionState, status !== 'success')
+      if (this.config.abortSignal?.aborted) { status = 'cancelled'; errors = ['Run cancelled'] }
+      await this.executeHooks('Stop')
+      await this.executeHooks('SessionEnd')
     }
-
-    // Hook: Stop (end of agentic loop)
-    await this.executeHooks('Stop')
-
-    // Hook: SessionEnd
-    await this.executeHooks('SessionEnd')
-
-    // Yield enriched final result
-    const endSubtype = budgetExceeded
-      ? 'error_max_budget_usd'
-      : turnsRemaining <= 0
-        ? 'error_max_turns'
-        : 'success'
-
+    for (const task of backgroundTasks) yield { type: 'system', subtype: 'task_notification', task_id: task.id, status: task.status, message: task.output }
+    const usage = this.getUsage()
+    const cost = this.getCost()
+    const modelUsage = Object.fromEntries(Object.entries(this.ledger.modelUsage ?? {}).map(([model, value]) => [model, {
+      input_tokens: value.input_tokens - (this.initialModelUsage[model]?.input_tokens ?? 0),
+      output_tokens: value.output_tokens - (this.initialModelUsage[model]?.output_tokens ?? 0),
+    }]))
     yield {
-      type: 'result',
-      subtype: endSubtype,
-      session_id: this.sessionId,
-      is_error: endSubtype !== 'success',
-      num_turns: this.turnCount,
-      total_cost_usd: this.totalCost,
-      duration_api_ms: Math.round(this.apiTimeMs),
-      usage: this.totalUsage,
-      model_usage: { [this.config.model]: { input_tokens: this.totalUsage.input_tokens, output_tokens: this.totalUsage.output_tokens } },
-      cost: this.totalCost,
+      type: 'result', subtype: status, session_id: this.sessionId,
+      is_error: status !== 'success', errors, num_turns: this.turnCount,
+      total_cost_usd: cost, cost, usage, duration_api_ms: Math.round(this.apiTimeMs),
+      model_usage: modelUsage,
     }
+  }
+
+  private chargeUsage(usage: TokenUsage): void {
+    this.ledger.modelUsage ??= {}
+    const modelUsage = this.ledger.modelUsage[this.config.model] ??= { input_tokens: 0, output_tokens: 0 }
+    for (const key of ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'] as const) {
+      if (usage[key] !== undefined) {
+        this.ledger.usage[key] = (this.ledger.usage[key] ?? 0) + usage[key]!
+        modelUsage[key] = (modelUsage[key] ?? 0) + usage[key]!
+      }
+    }
+    this.ledger.cost += estimateCost(this.config.model, usage, this.config.pricingPerMillion)
   }
 
   /**
    * Execute tool calls with concurrency control.
    *
-   * Read-only tools run concurrently (up to 10 at a time).
+   * Adjacent explicitly concurrency-safe read-only tools run concurrently (up to 10).
    * Mutation tools run sequentially.
    */
   private async executeTools(
     toolUseBlocks: ToolUseBlock[],
   ): Promise<(ToolResult & { tool_name?: string })[]> {
     const context: ToolContext = {
+      taskGroup: this.taskGroup,
       cwd: this.config.cwd,
       abortSignal: this.config.abortSignal,
       provider: this.provider,
       model: this.config.model,
       apiType: this.provider.apiType,
+      sessionState: this.config.sessionState,
+      tools: this.config.tools,
+      agents: this.config.agents,
+      canUseTool: this.config.canUseTool,
+      executionBudget: this.ledger,
+      maxBudgetUsd: this.config.maxBudgetUsd,
+      pricingPerMillion: this.config.pricingPerMillion,
+      hookRegistry: this.hookRegistry,
+      sessionId: this.sessionId,
     }
 
-    const MAX_CONCURRENCY = parseInt(
-      process.env.AGENT_SDK_MAX_TOOL_CONCURRENCY || '10',
-    )
-
-    // Partition into read-only (concurrent) and mutation (serial)
-    const readOnly: Array<{ block: ToolUseBlock; tool?: ToolDefinition }> = []
-    const mutations: Array<{ block: ToolUseBlock; tool?: ToolDefinition }> = []
-
-    for (const block of toolUseBlocks) {
-      const tool = this.config.tools.find((t) => t.name === block.name)
-      if (tool?.isReadOnly?.()) {
-        readOnly.push({ block, tool })
-      } else {
-        mutations.push({ block, tool })
-      }
-    }
+    const configuredConcurrency = Number(process.env.AGENT_SDK_MAX_TOOL_CONCURRENCY ?? 10)
+    const MAX_CONCURRENCY = Number.isFinite(configuredConcurrency) && configuredConcurrency >= 1
+      ? Math.floor(configuredConcurrency) : 10
 
     const results: (ToolResult & { tool_name?: string })[] = []
-
-    // Execute read-only tools concurrently (batched by MAX_CONCURRENCY)
-    for (let i = 0; i < readOnly.length; i += MAX_CONCURRENCY) {
-      const batch = readOnly.slice(i, i + MAX_CONCURRENCY)
-      const batchResults = await Promise.all(
-        batch.map((item) =>
-          this.executeSingleTool(item.block, item.tool, context),
-        ),
-      )
-      results.push(...batchResults)
-    }
-
-    // Execute mutation tools sequentially
-    for (const item of mutations) {
-      const result = await this.executeSingleTool(item.block, item.tool, context)
-      results.push(result)
+    // Mutations and tools without an explicit concurrency guarantee are barriers.
+    // Parallelize only adjacent safe reads; never move a read before an earlier write.
+    for (let i = 0; i < toolUseBlocks.length;) {
+      this.config.abortSignal?.throwIfAborted()
+      const block = toolUseBlocks[i]
+      const tool = this.config.tools.find(t => t.name === block.name)
+      const safe = (t?: ToolDefinition) => t?.isReadOnly?.() === true && t.isConcurrencySafe?.() === true
+      if (!safe(tool)) {
+        results.push(await this.executeSingleTool(block, tool, context))
+        i++
+        continue
+      }
+      const batch: Array<{ block: ToolUseBlock; tool?: ToolDefinition }> = []
+      while (i < toolUseBlocks.length && batch.length < MAX_CONCURRENCY) {
+        const next = toolUseBlocks[i]
+        const nextTool = this.config.tools.find(t => t.name === next.name)
+        if (!safe(nextTool)) break
+        batch.push({ block: next, tool: nextTool })
+        i++
+      }
+      results.push(...await Promise.all(batch.map(item => this.executeSingleTool(item.block, item.tool, context))))
     }
 
     return results
@@ -589,6 +484,9 @@ export class QueryEngine {
     tool: ToolDefinition | undefined,
     context: ToolContext,
   ): Promise<ToolResult & { tool_name?: string }> {
+    const cancelled = () => ({ type: 'tool_result' as const, tool_use_id: block.id,
+      content: 'Tool execution cancelled', is_error: true, tool_name: block.name })
+    if (context.abortSignal?.aborted) return cancelled()
     if (!tool) {
       return {
         type: 'tool_result',
@@ -637,6 +535,8 @@ export class QueryEngine {
       }
     }
 
+    if (context.abortSignal?.aborted) return cancelled()
+
     // Hook: PreToolUse
     const preHookResults = await this.executeHooks('PreToolUse', {
       toolName: block.name,
@@ -657,6 +557,7 @@ export class QueryEngine {
 
     // Execute the tool
     try {
+      if (context.abortSignal?.aborted) return cancelled()
       const result = await tool.call(block.input, context)
 
       // Hook: PostToolUse
@@ -698,13 +599,17 @@ export class QueryEngine {
    * Get total usage across all turns.
    */
   getUsage(): TokenUsage {
-    return { ...this.totalUsage }
+    const usage: TokenUsage = { input_tokens: 0, output_tokens: 0 }
+    for (const key of ['input_tokens', 'output_tokens', 'cache_creation_input_tokens', 'cache_read_input_tokens'] as const) {
+      if (this.ledger.usage[key] !== undefined) usage[key] = (this.ledger.usage[key] ?? 0) - (this.initialUsage[key] ?? 0)
+    }
+    return usage
   }
 
   /**
    * Get total cost.
    */
   getCost(): number {
-    return this.totalCost
+    return this.ledger.cost - this.initialCost
   }
 }

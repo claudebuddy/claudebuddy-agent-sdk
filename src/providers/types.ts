@@ -19,6 +19,7 @@ export type ApiType = 'anthropic-messages' | 'openai-completions'
 // --------------------------------------------------------------------------
 
 export interface CreateMessageParams {
+  signal?: AbortSignal
   model: string
   maxTokens: number
   system: string
@@ -76,9 +77,17 @@ export type NormalizedResponseBlock =
 // Provider Interface
 // --------------------------------------------------------------------------
 
+export type ProviderStreamEvent =
+  | { type: 'text'; text: string }
+  | { type: 'tool_use'; index: number; id?: string; name?: string; input?: string }
+  | { type: 'response'; response: CreateMessageResponse }
+
 export interface LLMProvider {
   /** The API type this provider implements. */
   readonly apiType: ApiType
+
+  /** Optional true incremental transport; must end with one complete response. */
+  streamMessage?(params: CreateMessageParams): AsyncGenerator<ProviderStreamEvent>
 
   /** Send a message and get a response. */
   createMessage(params: CreateMessageParams): Promise<CreateMessageResponse>

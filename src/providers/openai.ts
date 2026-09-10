@@ -7,8 +7,10 @@
  * Uses native fetch (no openai SDK dependency required).
  */
 
+import { readSSE } from './sse.js'
 import type {
   LLMProvider,
+  ProviderStreamEvent,
   CreateMessageParams,
   CreateMessageResponse,
   NormalizedMessageParam,
@@ -83,6 +85,11 @@ export class OpenAIProvider implements LLMProvider {
   }
 
   async createMessage(params: CreateMessageParams): Promise<CreateMessageResponse> {
+    const response = await this.request(params)
+    return this.convertResponse(await response.json() as OpenAIChatResponse)
+  }
+
+  private async request(params: CreateMessageParams, stream = false): Promise<Response> {
     // Convert to OpenAI format
     const messages = this.convertMessages(params.system, params.messages)
     const tools = params.tools ? this.convertTools(params.tools) : undefined
@@ -91,6 +98,7 @@ export class OpenAIProvider implements LLMProvider {
       model: params.model,
       max_tokens: params.maxTokens,
       messages,
+      ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
     }
 
     if (tools && tools.length > 0) {
@@ -99,6 +107,7 @@ export class OpenAIProvider implements LLMProvider {
 
     // Make API call
     const response = await fetch(`${this.baseURL}/chat/completions`, {
+      signal: params.signal,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -116,10 +125,45 @@ export class OpenAIProvider implements LLMProvider {
       throw err
     }
 
-    const data = (await response.json()) as OpenAIChatResponse
+    return response
+  }
 
-    // Convert response back to normalized format
-    return this.convertResponse(data)
+  async *streamMessage(params: CreateMessageParams): AsyncGenerator<ProviderStreamEvent> {
+    const response = await this.request(params, true)
+    if (!response.body) throw new Error('Streaming response has no body')
+    let text = ''
+    let finish: string | undefined
+    let usage: OpenAIChatResponse['usage']
+    const calls = new Map<number, OpenAIToolCall>()
+    for await (const data of readSSE(response.body)) {
+      params.signal?.throwIfAborted()
+      if (data === '[DONE]') break
+      const chunk = JSON.parse(data)
+      if (chunk.error) throw new Error(chunk.error.message || 'Streaming API error')
+      if (chunk.usage) usage = chunk.usage
+      const choice = chunk.choices?.find((c: any) => c.index === 0)
+      if (!choice) continue
+      if (choice.finish_reason) finish = choice.finish_reason
+      if (choice.delta?.content) {
+        text += choice.delta.content
+        yield { type: 'text', text: choice.delta.content }
+      }
+      for (const part of choice.delta?.tool_calls ?? []) {
+        const call = calls.get(part.index) ?? { id: '', type: 'function' as const, function: { name: '', arguments: '' } }
+        call.id += part.id ?? ''
+        call.function.name += part.function?.name ?? ''
+        call.function.arguments += part.function?.arguments ?? ''
+        calls.set(part.index, call)
+        yield { type: 'tool_use', index: part.index, id: part.id, name: part.function?.name, input: part.function?.arguments }
+      }
+    }
+    if (!finish) throw new Error('Streaming response ended before finish_reason')
+    const toolCalls = [...calls.entries()].sort(([a], [b]) => a - b).map(([, call]) => call)
+    if (finish !== 'length') for (const call of toolCalls) {
+      if (!call.id || !call.function.name) throw new Error('Incomplete streamed tool call')
+      JSON.parse(call.function.arguments)
+    }
+    yield { type: 'response', response: this.convertResponse({ id: '', choices: [{ index: 0, message: { role: 'assistant', content: text, tool_calls: toolCalls }, finish_reason: finish }], usage }) }
   }
 
   // --------------------------------------------------------------------------

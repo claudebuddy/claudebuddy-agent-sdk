@@ -1,3 +1,4 @@
+import { sessionStore, type SessionState } from './session-state.js'
 /**
  * ToolSearchTool - Discover deferred/lazy-loaded tools
  *
@@ -5,16 +6,16 @@
  * Supports keyword search and exact name selection.
  */
 
-import type { ToolDefinition, ToolResult } from '../types.js'
+import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 
 // Registry of deferred tools (set by the agent)
-let deferredTools: ToolDefinition[] = []
 
 /**
  * Set deferred tools available for search.
  */
-export function setDeferredTools(tools: ToolDefinition[]): void {
-  deferredTools = tools
+export function setDeferredTools(tools: ToolDefinition[], sessionState?: SessionState): void {
+  const state = getState(sessionState)
+  state.deferredTools = tools
 }
 
 export const ToolSearchTool: ToolDefinition = {
@@ -38,10 +39,11 @@ export const ToolSearchTool: ToolDefinition = {
   isConcurrencySafe: () => true,
   isEnabled: () => true,
   async prompt() { return 'Search for available tools.' },
-  async call(input: any): Promise<ToolResult> {
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
     const { query, max_results = 5 } = input
 
-    if (deferredTools.length === 0) {
+    if (state.deferredTools.length === 0) {
       return {
         type: 'tool_result',
         tool_use_id: '',
@@ -54,11 +56,11 @@ export const ToolSearchTool: ToolDefinition = {
     if (query.startsWith('select:')) {
       // Exact name selection
       const names = query.slice(7).split(',').map((n: string) => n.trim())
-      matches = deferredTools.filter(t => names.includes(t.name))
+      matches = state.deferredTools.filter(t => names.includes(t.name))
     } else {
       // Keyword search
       const keywords: string[] = query.toLowerCase().split(/\s+/)
-      matches = deferredTools
+      matches = state.deferredTools
         .filter(t => {
           const searchText = `${t.name} ${t.description}`.toLowerCase()
           return keywords.some((kw: string) => searchText.includes(kw))
@@ -84,4 +86,10 @@ export const ToolSearchTool: ToolDefinition = {
       content: `Found ${matches.length} tool(s):\n${lines.join('\n')}`,
     }
   },
+}
+
+function getState(sessionState?: SessionState) {
+  return sessionStore(sessionState, 'tool-search', () => ({
+    deferredTools: [] as ToolDefinition[],
+  }))
 }

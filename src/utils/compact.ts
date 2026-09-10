@@ -63,12 +63,15 @@ export async function compactConversation(
   model: string,
   messages: any[],
   state: AutoCompactState,
+  options: { signal?: AbortSignal; onUsage?: (usage: import('../types.js').TokenUsage) => void } = {},
 ): Promise<{
+  success: boolean
   compactedMessages: NormalizedMessageParam[]
   summary: string
   state: AutoCompactState
 }> {
   try {
+    options.signal?.throwIfAborted()
     // Strip images before compacting to save tokens
     const strippedMessages = stripImagesFromMessages(messages)
 
@@ -76,6 +79,7 @@ export async function compactConversation(
     const compactionPrompt = buildCompactionPrompt(strippedMessages)
 
     const response = await provider.createMessage({
+      signal: options.signal,
       model,
       maxTokens: 8192,
       system: 'You are a conversation summarizer. Create a detailed summary of the conversation that preserves all important context, decisions made, files modified, tool outputs, and current state. The summary should allow the conversation to continue seamlessly.',
@@ -87,10 +91,14 @@ export async function compactConversation(
       ],
     })
 
+    options.onUsage?.(response.usage)
+    options.signal?.throwIfAborted()
     const summary = response.content
       .filter((b) => b.type === 'text')
       .map((b) => (b as { type: 'text'; text: string }).text)
       .join('\n')
+
+    if (!summary.trim()) throw new Error('Compaction returned an empty summary')
 
     // Replace messages with summary
     const compactedMessages: NormalizedMessageParam[] = [
@@ -105,6 +113,7 @@ export async function compactConversation(
     ]
 
     return {
+      success: true,
       compactedMessages,
       summary,
       state: {
@@ -114,7 +123,9 @@ export async function compactConversation(
       },
     }
   } catch (err: any) {
+    if (options.signal?.aborted) throw options.signal.reason ?? err
     return {
+      success: false,
       compactedMessages: messages,
       summary: '',
       state: {

@@ -1,20 +1,21 @@
+import { sessionStore, type SessionState } from './session-state.js'
 /**
  * MCP Resource Tools
  *
  * ListMcpResources / ReadMcpResource - Access resources from MCP servers.
  */
 
-import type { ToolDefinition, ToolResult } from '../types.js'
+import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 import type { MCPConnection } from '../mcp/client.js'
 
 // Registry of MCP connections (set by the agent)
-let mcpConnections: MCPConnection[] = []
 
 /**
  * Set MCP connections for resource access.
  */
-export function setMcpConnections(connections: MCPConnection[]): void {
-  mcpConnections = connections
+export function setMcpConnections(connections: MCPConnection[], sessionState?: SessionState): void {
+  const state = getState(sessionState)
+  state.mcpConnections = connections
 }
 
 export const ListMcpResourcesTool: ToolDefinition = {
@@ -30,10 +31,12 @@ export const ListMcpResourcesTool: ToolDefinition = {
   isConcurrencySafe: () => true,
   isEnabled: () => true,
   async prompt() { return 'List MCP resources.' },
-  async call(input: any): Promise<ToolResult> {
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    if (context?.abortSignal?.aborted) return { type: 'tool_result', tool_use_id: '', content: 'MCP resource request cancelled.', is_error: true }
+    const state = getState(context?.sessionState)
     const connections = input.server
-      ? mcpConnections.filter(c => c.name === input.server)
-      : mcpConnections
+      ? state.mcpConnections.filter(c => c.name === input.server)
+      : state.mcpConnections
 
     if (connections.length === 0) {
       return {
@@ -49,18 +52,23 @@ export const ListMcpResourcesTool: ToolDefinition = {
       if (conn.status !== 'connected') continue
 
       try {
-        // Access the underlying client to list resources
-        const resources = (conn as any)._client?.listResources?.()
-        if (resources) {
-          results.push(`Server: ${conn.name}`)
-          for (const r of resources) {
-            results.push(`  - ${r.name}: ${r.description || r.uri || ''}`)
-          }
-        } else {
-          results.push(`Server: ${conn.name} (${conn.tools.length} tools available)`)
+        context?.abortSignal?.throwIfAborted()
+        if (!conn.listResources) {
+          results.push(`Server: ${conn.name} (resource listing not supported)`)
+          continue
         }
-      } catch {
-        results.push(`Server: ${conn.name} (resource listing not supported)`)
+        const { resources } = await conn.listResources(context?.abortSignal)
+        results.push(`Server: ${conn.name}`)
+        for (const resource of resources) {
+          results.push(`  - ${resource.name}: ${resource.description || resource.uri}`)
+        }
+        if (resources.length === 0) results.push('  No resources found.')
+      } catch (err: any) {
+        return {
+          type: 'tool_result', tool_use_id: '',
+          content: `Error listing resources from ${conn.name}: ${err.message}`,
+          is_error: true,
+        }
       }
     }
 
@@ -87,8 +95,10 @@ export const ReadMcpResourceTool: ToolDefinition = {
   isConcurrencySafe: () => true,
   isEnabled: () => true,
   async prompt() { return 'Read an MCP resource.' },
-  async call(input: any): Promise<ToolResult> {
-    const conn = mcpConnections.find(c => c.name === input.server)
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    if (context?.abortSignal?.aborted) return { type: 'tool_result', tool_use_id: '', content: 'MCP resource request cancelled.', is_error: true }
+    const state = getState(context?.sessionState)
+    const conn = state.mcpConnections.find(c => c.name === input.server)
     if (!conn) {
       return {
         type: 'tool_result',
@@ -99,9 +109,13 @@ export const ReadMcpResourceTool: ToolDefinition = {
     }
 
     try {
-      const result = await (conn as any)._client?.readResource?.({ uri: input.uri })
-      if (result?.contents) {
-        const texts = result.contents.map((c: any) => c.text || JSON.stringify(c)).join('\n')
+      context?.abortSignal?.throwIfAborted()
+      if (conn.status !== 'connected' || !conn.readResource) {
+        throw new Error(`Resource reading not supported by ${conn.name}`)
+      }
+      const result = await conn.readResource(input.uri, context?.abortSignal)
+      if (result.contents.length > 0) {
+        const texts = result.contents.map(c => 'text' in c ? c.text : JSON.stringify(c)).join('\n')
         return {
           type: 'tool_result',
           tool_use_id: '',
@@ -112,6 +126,7 @@ export const ReadMcpResourceTool: ToolDefinition = {
         type: 'tool_result',
         tool_use_id: '',
         content: 'Resource read returned no content.',
+        is_error: true,
       }
     } catch (err: any) {
       return {
@@ -122,4 +137,10 @@ export const ReadMcpResourceTool: ToolDefinition = {
       }
     }
   },
+}
+
+function getState(sessionState?: SessionState) {
+  return sessionStore(sessionState, 'mcp-resource-tools', () => ({
+    mcpConnections: [] as MCPConnection[],
+  }))
 }

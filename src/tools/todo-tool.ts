@@ -1,10 +1,11 @@
+import { sessionStore, type SessionState } from './session-state.js'
 /**
  * TodoWriteTool - Session todo/checklist management
  *
  * Manages a session-scoped todo list for tracking work items.
  */
 
-import type { ToolDefinition, ToolResult } from '../types.js'
+import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 
 export interface TodoItem {
   id: number
@@ -13,22 +14,22 @@ export interface TodoItem {
   priority?: 'high' | 'medium' | 'low'
 }
 
-const todoList: TodoItem[] = []
-let todoCounter = 0
 
 /**
  * Get all todos.
  */
-export function getTodos(): TodoItem[] {
-  return [...todoList]
+export function getTodos(sessionState?: SessionState): TodoItem[] {
+  const state = getState(sessionState)
+  return [...state.todoList]
 }
 
 /**
  * Clear all todos.
  */
-export function clearTodos(): void {
-  todoList.length = 0
-  todoCounter = 0
+export function clearTodos(sessionState?: SessionState): void {
+  const state = getState(sessionState)
+  state.todoList.length = 0
+  state.todoCounter = 0
 }
 
 export const TodoWriteTool: ToolDefinition = {
@@ -56,24 +57,25 @@ export const TodoWriteTool: ToolDefinition = {
   isConcurrencySafe: () => true,
   isEnabled: () => true,
   async prompt() { return 'Manage session todo list.' },
-  async call(input: any): Promise<ToolResult> {
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
     switch (input.action) {
       case 'add': {
         if (!input.text) {
           return { type: 'tool_result', tool_use_id: '', content: 'text required', is_error: true }
         }
         const item: TodoItem = {
-          id: ++todoCounter,
+          id: ++state.todoCounter,
           text: input.text,
           done: false,
           priority: input.priority,
         }
-        todoList.push(item)
+        state.todoList.push(item)
         return { type: 'tool_result', tool_use_id: '', content: `Todo added: #${item.id} "${item.text}"` }
       }
 
       case 'toggle': {
-        const item = todoList.find(t => t.id === input.id)
+        const item = state.todoList.find(t => t.id === input.id)
         if (!item) {
           return { type: 'tool_result', tool_use_id: '', content: `Todo #${input.id} not found`, is_error: true }
         }
@@ -82,26 +84,26 @@ export const TodoWriteTool: ToolDefinition = {
       }
 
       case 'remove': {
-        const idx = todoList.findIndex(t => t.id === input.id)
+        const idx = state.todoList.findIndex(t => t.id === input.id)
         if (idx === -1) {
           return { type: 'tool_result', tool_use_id: '', content: `Todo #${input.id} not found`, is_error: true }
         }
-        todoList.splice(idx, 1)
+        state.todoList.splice(idx, 1)
         return { type: 'tool_result', tool_use_id: '', content: `Todo #${input.id} removed` }
       }
 
       case 'list': {
-        if (todoList.length === 0) {
+        if (state.todoList.length === 0) {
           return { type: 'tool_result', tool_use_id: '', content: 'No todos.' }
         }
-        const lines = todoList.map(t =>
+        const lines = state.todoList.map(t =>
           `${t.done ? '[x]' : '[ ]'} #${t.id} ${t.text}${t.priority ? ` (${t.priority})` : ''}`
         )
         return { type: 'tool_result', tool_use_id: '', content: lines.join('\n') }
       }
 
       case 'clear': {
-        todoList.length = 0
+        state.todoList.length = 0
         return { type: 'tool_result', tool_use_id: '', content: 'All todos cleared.' }
       }
 
@@ -109,4 +111,11 @@ export const TodoWriteTool: ToolDefinition = {
         return { type: 'tool_result', tool_use_id: '', content: `Unknown action: ${input.action}`, is_error: true }
     }
   },
+}
+
+function getState(sessionState?: SessionState) {
+  return sessionStore(sessionState, 'todo-tool', () => ({
+    todoList: [] as TodoItem[],
+    todoCounter: 0,
+  }))
 }

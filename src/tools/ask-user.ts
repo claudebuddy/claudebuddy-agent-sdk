@@ -1,3 +1,4 @@
+import { sessionStore, type SessionState } from './session-state.js'
 /**
  * AskUserQuestionTool - Interactive user questions
  *
@@ -6,25 +7,27 @@
  * In non-interactive mode, returns a default or denies.
  */
 
-import type { ToolDefinition, ToolResult } from '../types.js'
+import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 
 // Callback for handling user questions (set by the agent)
-let questionHandler: ((question: string, options?: string[]) => Promise<string>) | null = null
 
 /**
  * Set the question handler for AskUserQuestion.
  */
 export function setQuestionHandler(
   handler: (question: string, options?: string[]) => Promise<string>,
+  sessionState?: SessionState,
 ): void {
-  questionHandler = handler
+  const state = getState(sessionState)
+  state.questionHandler = handler
 }
 
 /**
  * Clear the question handler.
  */
-export function clearQuestionHandler(): void {
-  questionHandler = null
+export function clearQuestionHandler(sessionState?: SessionState): void {
+  const state = getState(sessionState)
+  state.questionHandler = null
 }
 
 export const AskUserQuestionTool: ToolDefinition = {
@@ -50,10 +53,11 @@ export const AskUserQuestionTool: ToolDefinition = {
   isConcurrencySafe: () => false,
   isEnabled: () => true,
   async prompt() { return 'Ask the user a question.' },
-  async call(input: any): Promise<ToolResult> {
-    if (questionHandler) {
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
+    if (state.questionHandler) {
       try {
-        const answer = await questionHandler(input.question, input.options)
+        const answer = await state.questionHandler(input.question, input.options)
         return {
           type: 'tool_result',
           tool_use_id: '',
@@ -76,4 +80,10 @@ export const AskUserQuestionTool: ToolDefinition = {
       content: `[Non-interactive mode] Question: ${input.question}${input.options ? `\nOptions: ${input.options.join(', ')}` : ''}\n\nNo user available to answer. Proceeding with best judgment.`,
     }
   },
+}
+
+function getState(sessionState?: SessionState) {
+  return sessionStore(sessionState, 'ask-user', () => ({
+    questionHandler: null as ((question: string, options?: string[]) => Promise<string>) | null,
+  }))
 }

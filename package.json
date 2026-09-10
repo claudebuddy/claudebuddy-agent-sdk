@@ -16,7 +16,7 @@
   "bugs": {
     "url": "https://github.com/claudebuddy/claudebuddy-agent-sdk/issues"
   },
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Open-source Agent SDK. Runs the full agent loop in-process — no local CLI required. Deploy anywhere: cloud, serverless, Docker, CI/CD.",
   "type": "module",
   "main": "./dist/index.js",
@@ -24,7 +24,10 @@
   "files": [
     "dist",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/background-tasks.md",
+    "docs/runtime-progress.md",
+    "CHANGELOG.md"
   ],
   "exports": {
     ".": {
@@ -36,11 +39,12 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
-    "test": "npx tsx examples/01-simple-query.ts",
-    "test:all": "for f in examples/*.ts; do echo \"--- Running $f ---\"; npx tsx $f; echo; done",
+    "test": "tsx --test tests/*.test.ts",
+    "test:all": "npm test && npm run build",
     "web": "npx tsx examples/web/server.ts",
     "publish:npm": "npm publish --registry=https://registry.npmjs.org/",
-    "publish:github": "npm publish --registry=https://npm.pkg.github.com/"
+    "publish:github": "npm publish --registry=https://npm.pkg.github.com/",
+    "test:examples": "for f in examples/*.ts; do npx tsx \"$f\" || exit $?; done"
   },
   "engines": {
     "node": ">=18.0.0"

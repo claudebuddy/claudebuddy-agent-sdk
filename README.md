@@ -485,6 +485,79 @@ Start the web UI:
 npx tsx examples/web/server.ts
 ```
 
+## Background tasks
+
+`Bash` and `Agent` support `run_in_background: true`, returning a `task_id` for
+`TaskOutput` and `TaskStop`. Tasks execute within the current query; the engine
+joins them before its final result and cancels them on interruption. See
+[background execution](docs/background-tasks.md) for output, cancellation and
+lifecycle details. Scheduler placeholders are currently excluded from model tools.
+
+## Streaming and recovery
+
+Set `includePartialMessages: true` to receive real text/tool argument deltas from
+Anthropic and OpenAI-compatible transports. The final `assistant` event contains the
+complete response. Tool calls execute only after completion; adjacent explicitly
+safe reads may run concurrently, preserving mutation barriers.
+
+With persistence enabled, progress is checkpointed during execution and semantic
+events can be replayed with `readSessionEvents(sessionId, afterId?)`. Unknown tool
+outcomes are marked on resume and are not automatically replayed. See
+[streaming, scheduling and recovery](docs/runtime-progress.md) for usage, failure
+semantics and the single-writer storage requirement.
+
+## Runtime reliability and compatibility
+
+Each `Agent` owns its conversation and built-in tool state. Only one query or goal
+may run on an Agent at a time; use separate Agents for concurrent conversations.
+Children intentionally share the parent session state, cancellation signal and
+execution budget, while inheriting its available tools and permission policy.
+`clear()` clears conversation and tool state, retaining connected MCP servers.
+Configure session-specific helpers with the Agent's state handle, for example
+`setQuestionHandler(handler, agent.getToolState())`. Helpers called without a state
+handle retain legacy standalone behavior and do not configure Agent instances.
+
+Tool allow/deny lists apply to built-in, MCP and replacement tools. Query overrides
+can narrow the constructor's lists; `allowedTools: []` exposes no tools. Denials win.
+
+| Permission mode | Execution policy |
+| --- | --- |
+| `bypassPermissions` (default) | Available tools are permitted; a supplied `canUseTool` callback may still deny. |
+| `plan` | Only tools declaring `isReadOnly() === true`; callbacks cannot permit mutations. |
+| `default`, `auto` | Read-only or explicitly allowed tools are preapproved; other tools require an allowing callback. `auto` currently uses this deterministic policy. |
+| `dontAsk` | Read-only or explicitly allowed tools only. |
+| `acceptEdits` | Also preapproves the built-in file and notebook edit/write tools; other mutations require an allowing callback. |
+
+A supplied callback is still consulted for preapproved tools. Tool metadata and
+custom tool implementations are trusted host code. These policies do not provide
+OS isolation: requesting sandbox enforcement throws an explicit unsupported error.
+Goal runs additionally expose their internal goal-reporting tool.
+
+`prompt()` returns `subtype`, `is_error`, `errors` and `total_cost_usd` alongside text
+and usage. Check `is_error` before treating text as a completed answer. Provider
+failures, cancellation, exhausted turns and budget limits remain observable.
+Invalid configuration and overlapping runs throw. Goal execution emits one final
+aggregate result and stops on provider failure, cancellation or a budget limit.
+
+`maxBudgetUsd` covers one ordinary query, or all rounds of one goal, including child
+agents and compaction summaries. Usage and costs accumulate in the same ledger.
+The limit checks whether another request may start; an in-flight request can exceed
+it. Cost is estimated from configured pricing and reported token usage.
+
+Cancellation propagates to Anthropic/OpenAI transports, retry waits, compaction,
+child agents and MCP requests. Custom tools/providers must cooperate with the
+supplied abort signal; cancellation cannot undo completed side effects. Breaking
+out of a query iterator preserves conversation history and releases its run lock.
+
+Run offline regression tests and compile the SDK:
+
+```bash
+npm run test:all
+```
+
+`npm run test:examples` executes the examples separately; these may use live model
+APIs and require credentials.
+
 ## Star History
 
 <a href="https://www.star-history.com/?repos=claudebuddy%2Fclaudebuddy-agent-sdk&type=timeline&legend=top-left">

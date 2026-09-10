@@ -108,6 +108,8 @@ export interface SDKPartialMessage {
   type: 'partial_message'
   partial: {
     type: 'text' | 'tool_use'
+    index?: number
+    id?: string
     text?: string
     name?: string
     input?: string
@@ -169,6 +171,13 @@ export interface TokenUsage {
   cache_read_input_tokens?: number
 }
 
+/** Shared accounting for a query or goal and all of its child model calls. */
+export interface ExecutionBudget {
+  cost: number
+  usage: TokenUsage
+  modelUsage?: Record<string, TokenUsage>
+}
+
 // --------------------------------------------------------------------------
 // Tool Types
 // --------------------------------------------------------------------------
@@ -191,6 +200,8 @@ export interface ToolInputSchema {
 }
 
 export interface ToolContext {
+  /** Engine-owned background tasks, drained before the run result. */
+  taskGroup?: Set<string>
   cwd: string
   abortSignal?: AbortSignal
   /** Parent agent's LLM provider (inherited by subagents) */
@@ -199,6 +210,16 @@ export interface ToolContext {
   model?: string
   /** Parent agent's API type */
   apiType?: import('./providers/types.js').ApiType
+  /** Mutable state shared within one Agent session, never across instances. */
+  sessionState?: Map<string, unknown>
+  tools?: ToolDefinition[]
+  agents?: Record<string, AgentDefinition>
+  canUseTool?: CanUseToolFn
+  executionBudget?: ExecutionBudget
+  maxBudgetUsd?: number
+  pricingPerMillion?: { input: number; output: number }
+  hookRegistry?: import('./hooks.js').HookRegistry
+  sessionId?: string
 }
 
 export interface ToolResult {
@@ -502,6 +523,11 @@ export interface AgentOptions {
 }
 
 export interface QueryResult {
+  /** Final engine status, including cancellation and resource limits. */
+  subtype: string
+  is_error: boolean
+  errors?: string[]
+  total_cost_usd: number
   /** Final text output from the assistant */
   text: string
   /** Token usage */
@@ -528,6 +554,9 @@ export interface QueryEngineConfig {
   appendSystemPrompt?: string
   maxTurns: number
   maxBudgetUsd?: number
+  executionBudget?: ExecutionBudget
+  sessionState?: Map<string, unknown>
+  permissionMode?: PermissionMode
   maxTokens: number
   thinking?: ThinkingConfig
   jsonSchema?: Record<string, unknown>

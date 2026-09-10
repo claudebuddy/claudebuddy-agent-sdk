@@ -68,12 +68,13 @@ export async function withRetry<T>(
 
   for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
     if (abortSignal?.aborted) {
-      throw new Error('Aborted')
+      throw abortSignal.reason ?? new Error('Aborted')
     }
 
     try {
       return await fn()
     } catch (err: any) {
+      if (abortSignal?.aborted) throw abortSignal.reason ?? err
       lastError = err
 
       if (!isRetryableError(err, config)) {
@@ -86,7 +87,19 @@ export async function withRetry<T>(
 
       // Wait before retry
       const delay = getRetryDelay(attempt, config)
-      await new Promise((resolve) => setTimeout(resolve, delay))
+      await new Promise<void>((resolve, reject) => {
+        const onAbort = () => {
+          clearTimeout(timer)
+          abortSignal?.removeEventListener('abort', onAbort)
+          reject(abortSignal?.reason ?? new Error('Aborted'))
+        }
+        const timer = setTimeout(() => {
+          abortSignal?.removeEventListener('abort', onAbort)
+          resolve()
+        }, delay)
+        abortSignal?.addEventListener('abort', onAbort, { once: true })
+        if (abortSignal?.aborted) onAbort()
+      })
     }
   }
 

@@ -10,7 +10,7 @@ import type { ToolDefinition, ToolResult } from '../types.js'
 
 export const LSPTool: ToolDefinition = {
   name: 'LSP',
-  description: 'Language Server Protocol operations for code intelligence. Supports go-to-definition, find-references, hover, and symbol lookup.',
+  description: 'Approximate text-based symbol lookup using grep/ripgrep. No language server is connected; results are lexical matches, not semantic definitions or references.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -39,7 +39,7 @@ export const LSPTool: ToolDefinition = {
   isReadOnly: () => true,
   isConcurrencySafe: () => true,
   isEnabled: () => true,
-  async prompt() { return 'Code intelligence via Language Server Protocol.' },
+  async prompt() { return 'Text-based symbol lookup only; no language server or semantic analysis.' },
   async call(input: any, context: { cwd: string }): Promise<ToolResult> {
     const { operation, file_path, line, character, query } = input
 

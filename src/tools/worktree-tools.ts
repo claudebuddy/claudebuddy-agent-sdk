@@ -1,3 +1,4 @@
+import { sessionStore, type SessionState } from './session-state.js'
 /**
  * Git Worktree Tools
  *
@@ -6,12 +7,11 @@
  */
 
 import { execSync } from 'child_process'
-import { existsSync } from 'fs'
+import { randomUUID } from 'node:crypto'
 import { join } from 'path'
-import type { ToolDefinition, ToolResult } from '../types.js'
+import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 
 // Track active worktrees
-const activeWorktrees = new Map<string, { path: string; branch: string; originalCwd: string }>()
 
 export const EnterWorktreeTool: ToolDefinition = {
   name: 'EnterWorktree',
@@ -27,7 +27,8 @@ export const EnterWorktreeTool: ToolDefinition = {
   isConcurrencySafe: () => false,
   isEnabled: () => true,
   async prompt() { return 'Create an isolated git worktree for parallel work.' },
-  async call(input: any, context: { cwd: string }): Promise<ToolResult> {
+  async call(input: any, context: ToolContext): Promise<ToolResult> {
+    const state = getState(context.sessionState)
     try {
       // Check if we're in a git repo
       execSync('git rev-parse --git-dir', { cwd: context.cwd, encoding: 'utf-8' })
@@ -48,8 +49,8 @@ export const EnterWorktreeTool: ToolDefinition = {
         encoding: 'utf-8',
       })
 
-      const id = crypto.randomUUID()
-      activeWorktrees.set(id, {
+      const id = randomUUID()
+      state.activeWorktrees.set(id, {
         path: worktreePath,
         branch,
         originalCwd: context.cwd,
@@ -90,8 +91,9 @@ export const ExitWorktreeTool: ToolDefinition = {
   isConcurrencySafe: () => false,
   isEnabled: () => true,
   async prompt() { return 'Exit a git worktree.' },
-  async call(input: any): Promise<ToolResult> {
-    const worktree = activeWorktrees.get(input.id)
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
+    const worktree = state.activeWorktrees.get(input.id)
     if (!worktree) {
       return {
         type: 'tool_result',
@@ -121,7 +123,7 @@ export const ExitWorktreeTool: ToolDefinition = {
         }
       }
 
-      activeWorktrees.delete(input.id)
+      state.activeWorktrees.delete(input.id)
 
       return {
         type: 'tool_result',
@@ -137,4 +139,10 @@ export const ExitWorktreeTool: ToolDefinition = {
       }
     }
   },
+}
+
+function getState(sessionState?: SessionState) {
+  return sessionStore(sessionState, 'worktree-tools', () => ({
+    activeWorktrees: new Map<string, { path: string; branch: string; originalCwd: string }>(),
+  }))
 }

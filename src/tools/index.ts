@@ -68,7 +68,7 @@ import { SkillTool } from './skill-tool.js'
 /**
  * All built-in tools (30+).
  */
-const ALL_TOOLS: ToolDefinition[] = [
+function allTools(): ToolDefinition[] { return [
   // Core file I/O & execution
   BashTool,
   FileReadTool,
@@ -131,13 +131,13 @@ const ALL_TOOLS: ToolDefinition[] = [
 
   // Skill
   SkillTool,
-]
+] }
 
 /**
  * Get all built-in tools.
  */
 export function getAllBaseTools(): ToolDefinition[] {
-  return [...ALL_TOOLS]
+  return allTools()
 }
 
 /**
@@ -150,7 +150,7 @@ export function filterTools(
 ): ToolDefinition[] {
   let filtered = tools
 
-  if (allowedTools && allowedTools.length > 0) {
+  if (allowedTools !== undefined) {
     const allowed = new Set(allowedTools)
     filtered = filtered.filter((t) => allowed.has(t.name))
   }

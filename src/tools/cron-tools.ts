@@ -1,3 +1,4 @@
+import { sessionStore, type SessionState } from './session-state.js'
 /**
  * Cron/Scheduling Tools
  *
@@ -5,7 +6,7 @@
  * RemoteTrigger - Manage remote scheduled agent triggers.
  */
 
-import type { ToolDefinition, ToolResult } from '../types.js'
+import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 
 /**
  * Cron job definition.
@@ -22,27 +23,27 @@ export interface CronJob {
 }
 
 // In-memory cron store
-const cronStore = new Map<string, CronJob>()
-let cronCounter = 0
 
 /**
  * Get all cron jobs.
  */
-export function getAllCronJobs(): CronJob[] {
-  return Array.from(cronStore.values())
+export function getAllCronJobs(sessionState?: SessionState): CronJob[] {
+  const state = getState(sessionState)
+  return Array.from(state.cronStore.values())
 }
 
 /**
  * Clear all cron jobs.
  */
-export function clearCronJobs(): void {
-  cronStore.clear()
-  cronCounter = 0
+export function clearCronJobs(sessionState?: SessionState): void {
+  const state = getState(sessionState)
+  state.cronStore.clear()
+  state.cronCounter = 0
 }
 
 export const CronCreateTool: ToolDefinition = {
   name: 'CronCreate',
-  description: 'Create a scheduled recurring task (cron job). Supports cron expressions for scheduling.',
+  description: 'Store a cron definition only. No scheduler is installed, so this does not execute jobs.',
   inputSchema: {
     type: 'object',
     properties: {
@@ -54,10 +55,11 @@ export const CronCreateTool: ToolDefinition = {
   },
   isReadOnly: () => false,
   isConcurrencySafe: () => true,
-  isEnabled: () => true,
+  isEnabled: () => false,
   async prompt() { return 'Create a scheduled cron job.' },
-  async call(input: any): Promise<ToolResult> {
-    const id = `cron_${++cronCounter}`
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
+    const id = `cron_${++state.cronCounter}`
     const job: CronJob = {
       id,
       name: input.name,
@@ -66,12 +68,12 @@ export const CronCreateTool: ToolDefinition = {
       enabled: true,
       createdAt: new Date().toISOString(),
     }
-    cronStore.set(id, job)
+    state.cronStore.set(id, job)
 
     return {
       type: 'tool_result',
       tool_use_id: '',
-      content: `Cron job created: ${id} "${job.name}" schedule="${job.schedule}"`,
+      content: `Cron definition stored (not scheduled; execution unavailable): ${id} "${job.name}" schedule="${job.schedule}"`,
     }
   },
 }
@@ -88,13 +90,14 @@ export const CronDeleteTool: ToolDefinition = {
   },
   isReadOnly: () => false,
   isConcurrencySafe: () => true,
-  isEnabled: () => true,
+  isEnabled: () => false,
   async prompt() { return 'Delete a cron job.' },
-  async call(input: any): Promise<ToolResult> {
-    if (!cronStore.has(input.id)) {
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
+    if (!state.cronStore.has(input.id)) {
       return { type: 'tool_result', tool_use_id: '', content: `Cron job not found: ${input.id}`, is_error: true }
     }
-    cronStore.delete(input.id)
+    state.cronStore.delete(input.id)
     return { type: 'tool_result', tool_use_id: '', content: `Cron job deleted: ${input.id}` }
   },
 }
@@ -105,10 +108,10 @@ export const CronListTool: ToolDefinition = {
   inputSchema: { type: 'object', properties: {} },
   isReadOnly: () => true,
   isConcurrencySafe: () => true,
-  isEnabled: () => true,
+  isEnabled: () => false,
   async prompt() { return 'List cron jobs.' },
-  async call(): Promise<ToolResult> {
-    const jobs = getAllCronJobs()
+  async call(_input: any, context?: ToolContext): Promise<ToolResult> {
+    const jobs = getAllCronJobs(context?.sessionState)
     if (jobs.length === 0) {
       return { type: 'tool_result', tool_use_id: '', content: 'No cron jobs scheduled.' }
     }
@@ -139,15 +142,23 @@ export const RemoteTriggerTool: ToolDefinition = {
   },
   isReadOnly: () => false,
   isConcurrencySafe: () => true,
-  isEnabled: () => true,
+  isEnabled: () => false,
   async prompt() { return 'Manage remote agent triggers.' },
-  async call(input: any): Promise<ToolResult> {
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
     // RemoteTrigger operations are typically handled by the remote backend
     // In standalone SDK mode, we provide a stub implementation
     return {
       type: 'tool_result',
       tool_use_id: '',
-      content: `RemoteTrigger ${input.action}: This feature requires a connected remote backend. In standalone SDK mode, use CronCreate/CronList/CronDelete for local scheduling.`,
+      is_error: true,
+      content: `RemoteTrigger ${input.action}: This feature requires a connected remote backend. No remote backend is configured. Local cron definitions do not execute without a scheduler.`,
     }
   },
+}
+
+function getState(sessionState?: SessionState) {
+  return sessionStore(sessionState, 'cron-tools', () => ({
+    cronStore: new Map<string, CronJob>(),
+    cronCounter: 0,
+  }))
 }

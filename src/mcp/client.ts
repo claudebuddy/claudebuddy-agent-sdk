@@ -2,12 +2,16 @@
  * MCP Client - Connect to Model Context Protocol servers
  */
 
+import type { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import type { ListResourcesResult, ReadResourceResult } from '@modelcontextprotocol/sdk/types.js'
 import type { ToolDefinition, McpServerConfig, ToolContext, ToolResult } from '../types.js'
 
 export interface MCPConnection {
   name: string
   status: 'connected' | 'disconnected' | 'error'
   tools: ToolDefinition[]
+  listResources?: (signal?: AbortSignal) => Promise<ListResourcesResult>
+  readResource?: (uri: string, signal?: AbortSignal) => Promise<ReadResourceResult>
   close: () => Promise<void>
 }
 
@@ -64,6 +68,14 @@ export async function connectMCPServer(
       name,
       status: 'connected',
       tools,
+      listResources: (signal) => {
+        signal?.throwIfAborted()
+        return client.listResources(undefined, { signal })
+      },
+      readResource: (uri, signal) => {
+        signal?.throwIfAborted()
+        return client.readResource({ uri }, { signal })
+      },
       async close() {
         try {
           await client.close()
@@ -89,7 +101,7 @@ export async function connectMCPServer(
 function createMCPToolDefinition(
   serverName: string,
   mcpTool: { name: string; description?: string; inputSchema?: any },
-  client: any,
+  client: Client,
 ): ToolDefinition {
   const toolName = `mcp__${serverName}__${mcpTool.name}`
 
@@ -103,16 +115,17 @@ function createMCPToolDefinition(
     async prompt() {
       return mcpTool.description || ''
     },
-    async call(input: any): Promise<ToolResult> {
+    async call(input: any, context: ToolContext): Promise<ToolResult> {
       try {
+        context.abortSignal?.throwIfAborted()
         const result = await client.callTool({
           name: mcpTool.name,
           arguments: input,
-        })
+        }, undefined, { signal: context.abortSignal })
 
         // Extract text content from MCP result
         let output = ''
-        if (result.content) {
+        if (Array.isArray(result.content)) {
           for (const block of result.content) {
             if (block.type === 'text') {
               output += block.text
@@ -128,7 +141,7 @@ function createMCPToolDefinition(
           type: 'tool_result',
           tool_use_id: '',
           content: output,
-          is_error: result.isError || false,
+          is_error: result.isError === true,
         }
       } catch (err: any) {
         return {

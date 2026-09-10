@@ -5,9 +5,9 @@
  * Manages session lifecycle (create, resume, list, fork).
  */
 
-import { readFile, writeFile, mkdir, readdir, stat } from 'fs/promises'
+import { readFile, writeFile, mkdir, readdir, stat, open, rename, unlink } from 'fs/promises'
 import { join } from 'path'
-import type { Message } from './types.js'
+import type { Message, SDKMessage } from './types.js'
 import type { NormalizedMessageParam } from './providers/types.js'
 
 /**
@@ -35,6 +35,7 @@ export interface SessionData {
  * Get the sessions directory path.
  */
 function getSessionsDir(): string {
+  if (process.env.AGENT_SDK_SESSION_DIR) return process.env.AGENT_SDK_SESSION_DIR
   const home = process.env.HOME || process.env.USERPROFILE || '/tmp'
   return join(home, '.open-agent-sdk', 'sessions')
 }
@@ -43,6 +44,7 @@ function getSessionsDir(): string {
  * Get the path for a specific session.
  */
 function getSessionPath(sessionId: string): string {
+  if (!/^[a-zA-Z0-9_-]+$/.test(sessionId)) throw new Error('Invalid session id')
   return join(getSessionsDir(), sessionId)
 }
 
@@ -57,12 +59,17 @@ export async function saveSession(
   const dir = getSessionPath(sessionId)
   await mkdir(dir, { recursive: true })
 
+  const previous = await readFile(join(dir, 'transcript.json'), 'utf8').then(
+    text => JSON.parse(text) as SessionData,
+    (error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error; return undefined },
+  )
+
   const data: SessionData = {
     metadata: {
       id: sessionId,
       cwd: metadata.cwd || process.cwd(),
       model: metadata.model || 'claude-sonnet-4-6',
-      createdAt: metadata.createdAt || new Date().toISOString(),
+      createdAt: metadata.createdAt || previous?.metadata.createdAt || new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       messageCount: messages.length,
       summary: metadata.summary,
@@ -70,11 +77,14 @@ export async function saveSession(
     messages,
   }
 
-  await writeFile(
-    join(dir, 'transcript.json'),
-    JSON.stringify(data, null, 2),
-    'utf-8',
-  )
+  const temporary = join(dir, `transcript-${crypto.randomUUID()}.tmp`)
+  try {
+    const handle = await open(temporary, 'wx', 0o600)
+    try { await handle.writeFile(JSON.stringify(data, null, 2)); await handle.sync() }
+    finally { await handle.close() }
+    await rename(temporary, join(dir, 'transcript.json'))
+  } finally { await unlink(temporary).catch(() => {}) }
+
 }
 
 /**
@@ -84,7 +94,23 @@ export async function loadSession(sessionId: string): Promise<SessionData | null
   try {
     const filePath = join(getSessionPath(sessionId), 'transcript.json')
     const content = await readFile(filePath, 'utf-8')
-    return JSON.parse(content) as SessionData
+    const data = JSON.parse(content) as SessionData
+    // A crash after a tool request leaves its outcome unknown. Pair it with an
+    // explicit failure, never replay a possibly completed external mutation.
+    for (let i = 0; i < data.messages.length; i++) {
+      const message = data.messages[i]
+      if (message.role !== 'assistant' || !Array.isArray(message.content)) continue
+      const calls = message.content.filter(block => block.type === 'tool_use')
+      const next = data.messages[i + 1]
+      const results = next?.role === 'user' && Array.isArray(next.content) ? next.content : []
+      const missing = calls.filter(call => !results.some(result => result.type === 'tool_result' && result.tool_use_id === call.id))
+      if (missing.length) {
+        const interrupted = missing.map(call => ({ type: 'tool_result' as const, tool_use_id: call.id, content: 'Execution interrupted; tool outcome unknown. Verify external state before retrying.', is_error: true }))
+        if (results.length) results.push(...interrupted)
+        else data.messages.splice(i + 1, 0, { role: 'user', content: interrupted })
+      }
+    }
+    return data
   } catch {
     return null
   }
@@ -224,4 +250,60 @@ export async function tagSession(
   data.metadata.updatedAt = new Date().toISOString()
 
   await saveSession(sessionId, data.messages, data.metadata)
+}
+
+/** Durable semantic event log. File order is authoritative; id is a replay cursor. */
+export interface SessionEvent {
+  version: 1
+  id: string
+  timestamp: string
+  event: SDKMessage
+}
+
+export async function appendSessionEvent(sessionId: string, event: SDKMessage): Promise<void> {
+  // Token deltas are ephemeral; complete assistant messages are persisted instead.
+  if (event.type === 'partial_message') return
+  const dir = getSessionPath(sessionId)
+  await mkdir(dir, { recursive: true })
+  const path = join(dir, 'events.jsonl')
+  const record: SessionEvent = { version: 1, id: crypto.randomUUID(), timestamp: new Date().toISOString(), event }
+  const handle = await open(path, 'a+', 0o600)
+  try {
+    // Normally read just the last byte. Scan backwards only after a torn append.
+    const { size } = await handle.stat()
+    if (size) {
+      const last = Buffer.alloc(1)
+      await handle.read(last, 0, 1, size - 1)
+      if (last[0] !== 10) {
+        let end = size
+        let boundary = 0
+        while (end > 0) {
+          const start = Math.max(0, end - 65536)
+          const chunk = Buffer.alloc(end - start)
+          await handle.read(chunk, 0, chunk.length, start)
+          const newline = chunk.lastIndexOf(10)
+          if (newline >= 0) { boundary = start + newline + 1; break }
+          end = start
+        }
+        await handle.truncate(boundary)
+      }
+    }
+    await handle.writeFile(JSON.stringify(record) + '\n')
+    await handle.sync()
+  } finally { await handle.close() }
+
+}
+
+export async function readSessionEvents(sessionId: string, afterId?: string): Promise<SessionEvent[]> {
+  const content = await readFile(join(getSessionPath(sessionId), 'events.jsonl'), 'utf8').catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== 'ENOENT') throw error
+    return ''
+  })
+  const lines = content.split('\n')
+  lines.pop() // ignore a torn final record, or the empty trailing line
+  const records = lines.filter(Boolean).map(line => JSON.parse(line) as SessionEvent)
+  if (!afterId) return records
+  const index = records.findIndex(record => record.id === afterId)
+  if (index < 0) throw new Error('Unknown session event cursor')
+  return records.slice(index + 1)
 }

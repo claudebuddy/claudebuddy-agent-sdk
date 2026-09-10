@@ -23,17 +23,21 @@ import type {
   QueryResult,
   SDKMessage,
   ToolDefinition,
-  CanUseToolFn,
+  ExecutionBudget,
+  SDKResultMessage,
   Message,
   PermissionMode,
 } from './types.js'
 import { QueryEngine } from './engine.js'
 import { getAllBaseTools, filterTools } from './tools/index.js'
+import { clearTasks, getAllTasks, settleTaskGroup } from './tools/task-tools.js'
 import { connectMCPServer, type MCPConnection } from './mcp/client.js'
+import { setMcpConnections } from './tools/mcp-resource-tools.js'
 import { isSdkServerConfig } from './sdk-mcp-server.js'
-import { registerAgents } from './tools/agent-tool.js'
+import { createPermissionPolicy, restrictTools, validateRunOptions } from './utils/permissions.js'
 import {
   saveSession,
+  appendSessionEvent,
   loadSession,
 } from './session.js'
 import { createHookRegistry, type HookRegistry } from './hooks.js'
@@ -44,7 +48,7 @@ import {
   createUpdateGoalTool,
   buildGoalSystemPrompt,
   getGoalState,
-  resetGoalState,
+  createGoalState,
 } from './tools/update-goal.js'
 
 // --------------------------------------------------------------------------
@@ -66,10 +70,19 @@ export class Agent {
   private abortCtrl: AbortController | null = null
   private currentEngine: QueryEngine | null = null
   private hookRegistry: HookRegistry
+  private sessionState = new Map<string, unknown>()
+  private activeRun = false
+  private closed = false
 
   constructor(options: AgentOptions = {}) {
-    // Shallow copy to avoid mutating caller's object
-    this.cfg = { ...options }
+    validateRunOptions(options)
+    // Snapshot permission bounds and agent definitions rather than sharing caller arrays.
+    this.cfg = {
+      ...options,
+      allowedTools: options.allowedTools ? [...options.allowedTools] : options.allowedTools,
+      disallowedTools: options.disallowedTools ? [...options.disallowedTools] : options.disallowedTools,
+      agents: structuredClone(options.agents ?? {}),
+    }
 
     // Merge credentials from options.env map, direct options, and process.env
     this.apiCredentials = this.pickCredentials()
@@ -201,11 +214,6 @@ export class Agent {
    * Async initialization: connect MCP servers, register agents, resume sessions.
    */
   private async setup(): Promise<void> {
-    // Register custom agent definitions
-    if (this.cfg.agents) {
-      registerAgents(this.cfg.agents)
-    }
-
     // Connect MCP servers (supports stdio, SSE, HTTP, and in-process SDK servers)
     if (this.cfg.mcpServers) {
       for (const [name, config] of Object.entries(this.cfg.mcpServers)) {
@@ -228,6 +236,8 @@ export class Agent {
       }
     }
 
+    setMcpConnections(this.mcpLinks, this.sessionState)
+
     // Resume or continue session. An explicitly supplied history wins: hosts
     // that keep sessions in their own store (a database) pass it here and the
     // session files are never read.
@@ -243,290 +253,223 @@ export class Agent {
     }
   }
 
-  /**
-   * Run a query with streaming events.
-   */
-  async *query(
-    prompt: string | any[],
-    overrides?: Partial<AgentOptions>,
+  /** Run one query, or an explicitly configured goal, with exclusive session ownership. */
+  async *query(prompt: string | any[], overrides?: Partial<AgentOptions>): AsyncGenerator<SDKMessage, void> {
+    const opts = { ...this.cfg, ...overrides }
+    const configuredGoal = typeof this.cfg.goal === 'object' ? this.cfg.goal : undefined
+    const overriddenGoal = typeof overrides?.goal === 'object' ? overrides.goal : undefined
+    const autoGoal = overrides?.goal === false ? false :
+      overriddenGoal?.enabledOnQuery ?? configuredGoal?.enabledOnQuery ?? false
+    yield* this.withRun(opts, budget => autoGoal && typeof prompt === 'string'
+      ? this.runGoalInternal(prompt, overrides, budget)
+      : this.queryOnce(prompt, overrides, budget))
+  }
+
+  /** A controller and ledger outlive every round/child in this run. */
+  private async *withRun(
+    opts: AgentOptions,
+    run: (budget: ExecutionBudget) => AsyncGenerator<SDKMessage, void>,
   ): AsyncGenerator<SDKMessage, void> {
-    await this.setupDone
-
-    // Goal auto-takeover: when configured with goal.enabledOnQuery and the
-    // prompt is a plain string goal, route this query through the goal-driven
-    // loop instead of a single turn. Non-string prompts (message arrays) are
-    // always handled as a normal single-turn query.
-    const goalOpts = typeof this.cfg.goal === 'object' ? this.cfg.goal : undefined
-    const overrideGoal = typeof overrides?.goal === 'object' ? overrides.goal : undefined
-    // Explicit override (e.g. runGoal disabling re-entry) wins over the config.
-    const autoGoalFlag = overrideGoal?.enabledOnQuery !== undefined
-      ? overrideGoal.enabledOnQuery
-      : (goalOpts?.enabledOnQuery ?? false)
-    if (autoGoalFlag && typeof prompt === 'string') {
-      yield* this.runGoal(prompt, {})
-      return
+    if (this.closed) throw new Error('Agent is closed')
+    if (this.activeRun) throw new Error('Agent already has an active query or goal')
+    validateRunOptions(opts)
+    // A per-query override cannot turn off configured sandbox enforcement.
+    validateRunOptions(this.cfg)
+    this.activeRun = true
+    const controller = new AbortController()
+    this.abortCtrl = controller
+    const sources = new Set([opts.abortSignal, opts.abortController?.signal].filter((signal): signal is AbortSignal => !!signal))
+    const listeners: Array<() => void> = []
+    for (const source of sources) {
+      const abort = () => controller.abort(source.reason)
+      if (source.aborted) abort()
+      else {
+        source.addEventListener('abort', abort, { once: true })
+        listeners.push(() => source.removeEventListener('abort', abort))
+      }
     }
+    const budget: ExecutionBudget = { cost: 0, usage: { input_tokens: 0, output_tokens: 0 } }
+    try {
+      await this.setupDone
+      for await (const event of run(budget)) {
+        if (opts.persistSession !== false) await appendSessionEvent(this.sid, event)
+        yield event
+      }
+    } finally {
+      controller.abort()
+      for (const remove of listeners) remove()
+      this.currentEngine = null
+      this.abortCtrl = null
+      this.activeRun = false
+    }
+  }
 
+  private async *queryOnce(
+    prompt: string | any[],
+    overrides: Partial<AgentOptions> | undefined,
+    budget: ExecutionBudget,
+    internalTools: ToolDefinition[] = [],
+  ): AsyncGenerator<SDKMessage, void> {
     const opts = { ...this.cfg, ...overrides }
     const cwd = opts.cwd || process.cwd()
-
-    // Create abort controller for this query
-    this.abortCtrl = opts.abortController || new AbortController()
-    if (opts.abortSignal) {
-      opts.abortSignal.addEventListener('abort', () => this.abortCtrl?.abort(), { once: true })
-    }
-
-    // Resolve systemPrompt (handle preset object)
     let systemPrompt: string | undefined
     let appendSystemPrompt = opts.appendSystemPrompt
-    if (typeof opts.systemPrompt === 'object' && opts.systemPrompt?.type === 'preset') {
-      systemPrompt = undefined // Use engine default (default style)
-      if (opts.systemPrompt.append) {
-        appendSystemPrompt = (appendSystemPrompt || '') + '\n' + opts.systemPrompt.append
-      }
+    if (typeof opts.systemPrompt === 'object') {
+      appendSystemPrompt = [appendSystemPrompt, opts.systemPrompt.append].filter(Boolean).join('\n')
     } else {
-      systemPrompt = opts.systemPrompt as string | undefined
+      systemPrompt = opts.systemPrompt
     }
 
-    // Build canUseTool based on permission mode
-    const permMode = opts.permissionMode ?? 'bypassPermissions'
-    const canUseTool: CanUseToolFn = opts.canUseTool ?? (async (_tool, _input) => {
-      if (permMode === 'bypassPermissions' || permMode === 'dontAsk' || permMode === 'auto') {
-        return { behavior: 'allow' }
-      }
-      if (permMode === 'acceptEdits') {
-        return { behavior: 'allow' }
-      }
-      return { behavior: 'allow' }
-    })
-
-    // Resolve tools with overrides
     let tools = this.toolPool
-    if (overrides?.allowedTools || overrides?.disallowedTools) {
-      tools = filterTools(tools, overrides.allowedTools, overrides.disallowedTools)
+    const replacement = overrides?.tools
+    if (Array.isArray(replacement)) {
+      tools = replacement.length && typeof replacement[0] === 'string'
+        ? filterTools(this.toolPool, replacement as string[])
+        : replacement as ToolDefinition[]
     }
-    if (overrides?.tools) {
-      const ot = overrides.tools
-      if (Array.isArray(ot) && ot.length > 0 && typeof ot[0] === 'string') {
-        tools = filterTools(this.toolPool, ot as string[])
-      } else if (Array.isArray(ot)) {
-        tools = ot as ToolDefinition[]
-      }
-    }
+    tools = restrictTools(tools, this.cfg, overrides)
+    const mode = opts.permissionMode ?? 'bypassPermissions'
+    const policy = createPermissionPolicy(mode, opts.allowedTools, opts.canUseTool)
+    // Internal goal reporting is control-plane bookkeeping, not an external action.
+    const canUseTool = (tool: ToolDefinition, input: unknown) => internalTools.includes(tool)
+      ? Promise.resolve({ behavior: 'allow' as const })
+      : policy(tool, input)
+    tools = [...tools, ...internalTools]
 
-    // Recreate provider if overrides change credentials or apiType
     let provider = this.provider
     if (overrides?.apiType || overrides?.apiKey || overrides?.baseURL) {
-      const resolvedApiType = overrides.apiType ?? this.apiType
-      provider = createProvider(resolvedApiType, {
+      provider = createProvider(overrides.apiType ?? this.apiType, {
         apiKey: overrides.apiKey ?? this.apiCredentials.key,
         baseURL: overrides.baseURL ?? this.apiCredentials.baseUrl,
       })
     }
-
-    // Create query engine with current conversation state
     const engine = new QueryEngine({
-      cwd,
-      model: opts.model || this.modelId,
-      provider,
-      tools,
-      systemPrompt,
-      appendSystemPrompt,
-      maxTurns: opts.maxTurns ?? 10,
-      maxBudgetUsd: opts.maxBudgetUsd,
-      maxTokens: opts.maxTokens ?? 16384,
-      thinking: opts.thinking,
-      jsonSchema: opts.jsonSchema,
-      canUseTool,
+      cwd, model: opts.model || this.modelId, provider, tools, systemPrompt,
+      appendSystemPrompt, maxTurns: opts.maxTurns ?? 10,
+      maxBudgetUsd: opts.maxBudgetUsd, executionBudget: budget,
+      maxTokens: opts.maxTokens ?? 16384, thinking: opts.thinking,
+      jsonSchema: opts.jsonSchema, canUseTool, permissionMode: mode,
       includePartialMessages: opts.includePartialMessages ?? false,
-      abortSignal: this.abortCtrl.signal,
-      agents: opts.agents,
-      hookRegistry: this.hookRegistry,
-      sessionId: this.sid,
-      contextWindowSize: opts.contextWindowSize,
-      pricingPerMillion: opts.pricingPerMillion,
-      spill: opts.spill,
+      abortSignal: this.abortCtrl!.signal, agents: opts.agents ?? {},
+      sessionState: this.sessionState, hookRegistry: this.hookRegistry,
+      sessionId: this.sid, contextWindowSize: opts.contextWindowSize,
+      pricingPerMillion: opts.pricingPerMillion, spill: opts.spill,
     })
     this.currentEngine = engine
-
-    // Inject existing conversation history
-    for (const msg of this.history) {
-      (engine as any).messages.push(msg)
-    }
-
-    // Run the engine
-    for await (const event of engine.submitMessage(prompt)) {
-      yield event
-
-      // Track assistant messages for multi-turn persistence
-      if (event.type === 'assistant') {
-        const uuid = crypto.randomUUID()
-        const timestamp = new Date().toISOString()
-        this.messageLog.push({
-          type: 'assistant',
-          message: event.message,
-          uuid,
-          timestamp,
-        })
+    engine.messages.push(...this.history)
+    let userRecorded = false
+    try {
+      for await (const event of engine.submitMessage(prompt)) {
+        if (event.type === 'system' && event.subtype === 'init' && !userRecorded) {
+          this.messageLog.push({ type: 'user', message: { role: 'user', content: prompt }, uuid: crypto.randomUUID(), timestamp: new Date().toISOString() })
+          userRecorded = true
+        }
+        if (event.type === 'assistant') {
+          this.messageLog.push({ type: 'assistant', message: event.message, uuid: crypto.randomUUID(), timestamp: new Date().toISOString() })
+        }
+        if (opts.persistSession !== false && event.type !== 'partial_message') {
+          // Checkpoint before publishing durable semantic events to the consumer.
+          await saveSession(this.sid, engine.getMessages(), { cwd, model: opts.model || this.modelId })
+        }
+        yield event
       }
+    } finally {
+      this.history = engine.getMessages()
+      if (opts.persistSession !== false) await saveSession(this.sid, this.history, { cwd, model: opts.model || this.modelId })
+      this.currentEngine = null
     }
-
-    // Persist conversation state for multi-turn
-    this.history = engine.getMessages()
-
-    // Add user message to tracked messages
-    const userUuid = crypto.randomUUID()
-    this.messageLog.push({
-      type: 'user',
-      message: { role: 'user', content: prompt },
-      uuid: userUuid,
-      timestamp: new Date().toISOString(),
-    })
   }
 
-  /**
-   * Convenience method: send a prompt and collect the final answer as a single object.
-   * Internally iterates through the streaming query and aggregates the outcome.
-   */
-  async prompt(
-    text: string,
-    overrides?: Partial<AgentOptions>,
-  ): Promise<QueryResult> {
-    const t0 = performance.now()
-    const collected = { text: '', turns: 0, tokens: { in: 0, out: 0 } }
-
-    for await (const ev of this.query(text, overrides)) {
-      switch (ev.type) {
-        case 'assistant': {
-          // Extract the last assistant text (multi-turn: only final answer matters)
-          const fragments = (ev.message.content as any[])
-            .filter((c: any) => c.type === 'text')
-            .map((c: any) => c.text)
-          if (fragments.length) collected.text = fragments.join('')
-          break
-        }
-        case 'result':
-          collected.turns = ev.num_turns ?? 0
-          collected.tokens.in = ev.usage?.input_tokens ?? 0
-          collected.tokens.out = ev.usage?.output_tokens ?? 0
-          break
-      }
+  /** Collect text and retain the final status instead of hiding engine failures. */
+  async prompt(text: string, overrides?: Partial<AgentOptions>): Promise<QueryResult> {
+    const start = performance.now()
+    let output = ''
+    let result: SDKResultMessage = { type: 'result', subtype: 'error_during_execution', is_error: true, errors: ['Query ended without a final result'] }
+    for await (const event of this.query(text, overrides)) {
+      if (event.type === 'assistant') {
+        const fragments = event.message.content.filter(block => block.type === 'text').map(block => block.text)
+        if (fragments.length) output = fragments.join('')
+      } else if (event.type === 'result') result = event
     }
-
     return {
-      text: collected.text,
-      usage: { input_tokens: collected.tokens.in, output_tokens: collected.tokens.out },
-      num_turns: collected.turns,
-      duration_ms: Math.round(performance.now() - t0),
+      text: output, subtype: result.subtype, is_error: result.is_error ?? result.subtype !== 'success',
+      errors: result.errors, total_cost_usd: result.total_cost_usd ?? result.cost ?? 0,
+      usage: result.usage ?? { input_tokens: 0, output_tokens: 0 },
+      num_turns: result.num_turns ?? 0, duration_ms: Math.round(performance.now() - start),
       messages: [...this.messageLog],
     }
   }
 
-  /**
-   * Goal-driven autonomous loop.
-   *
-   * Runs the agent toward `goal` over up to `maxRounds` rounds. Unlike a single
-   * `query`, the agent keeps working ("give it a task and let it run until done")
-   * and only stops when:
-   *  - it calls the injected `update_goal` tool with goal_status="complete", or
-   *  - it reports goal_status="blocked", or
-   *  - `maxRounds` is exhausted (returns with a helpful error event), or
-   *  - it is aborted.
-   *
-   * The `update_goal` internal tool is injected into the tool pool and a
-   * goal-mode system prompt is appended, so the agent knows it should keep
-   * working autonomously and how to signal completion.
-   */
-  async *runGoal(
+  /** Goal rounds share cancellation, accounting and a run-local goal report. */
+  async *runGoal(goal: string, overrides?: { maxGoalRounds?: number; turnsPerRound?: number }): AsyncGenerator<SDKMessage, void> {
+    const goalOptions = typeof this.cfg.goal === 'object' ? this.cfg.goal : {}
+    const queryOverrides: Partial<AgentOptions> = { goal: { ...goalOptions, ...overrides } }
+    yield* this.withRun(this.cfg, budget => this.runGoalInternal(goal, queryOverrides, budget))
+  }
+
+  private async *runGoalInternal(
     goal: string,
-    overrides?: { maxGoalRounds?: number; turnsPerRound?: number },
+    overrides: Partial<AgentOptions> | undefined,
+    budget: ExecutionBudget,
   ): AsyncGenerator<SDKMessage, void> {
-    const goalOpts = this.cfg.goal
-    const maxRounds = overrides?.maxGoalRounds ??
-      (typeof goalOpts === 'object' ? goalOpts.maxGoalRounds : undefined) ??
-      10
-    const turnsPerRound = overrides?.turnsPerRound ??
-      (typeof goalOpts === 'object' ? goalOpts.turnsPerRound : undefined)
-    const maxConsecutiveStalls = typeof goalOpts === 'object'
-      ? goalOpts.maxConsecutiveStalls
-      : undefined
-
-    // Reset the shared goal-state record for this run.
-    resetGoalState()
-
-    // Inject the internal update_goal tool and the goal-mode system prompt.
-    const goalTool = createUpdateGoalTool()
-    // Build a base tool pool: if the caller restricts tools, respect it; else
-    // use the agent's resolved pool. Always append the internal tool.
-    const baseTools: ToolDefinition[] = this.toolPool
-    const toolOverrides: Partial<AgentOptions> = {
-      tools: [...baseTools, goalTool],
+    const opts = { ...this.cfg, ...overrides }
+    const settings = typeof opts.goal === 'object' ? opts.goal : {}
+    const maxRounds = settings.maxGoalRounds ?? 10
+    const turnsPerRound = settings.turnsPerRound ?? opts.maxTurns ?? 10
+    const maxStalls = settings.maxConsecutiveStalls
+    for (const [name, value] of Object.entries({ maxGoalRounds: maxRounds, turnsPerRound, maxConsecutiveStalls: maxStalls })) {
+      if (value !== undefined && (!Number.isInteger(value) || value < 1)) throw new Error(`${name} must be a positive integer`)
     }
-
-    // Track consecutive rounds without a status update (stall detection).
-    let lastRevision = getGoalState().revision
-    let consecutiveStalls = 0
-
-    let roundsDone = 0
-    for (; roundsDone < maxRounds; roundsDone++) {
-      const roundTarget = roundsDone === 0
-        ? goal
-        : `Continue working toward the goal. Stay on task and do not stop until the goal is complete or you are truly blocked. Call update_goal with goal_status="complete" when done.`
-
+    const state = createGoalState()
+    const goalTool = createUpdateGoalTool(state)
+    let lastRevision = 0
+    let stalls = 0
+    let turns = 0
+    let apiTime = 0
+    let terminal: SDKResultMessage = { type: 'result', subtype: 'error_max_rounds', errors: [`Goal not completed after ${maxRounds} rounds`] }
+    for (let round = 0; round < maxRounds; round++) {
+      if (this.abortCtrl!.signal.aborted) {
+        terminal = { type: 'result', subtype: 'cancelled', errors: ['Run cancelled'] }
+        break
+      }
       const roundOverrides: Partial<AgentOptions> = {
-        ...toolOverrides,
-        appendSystemPrompt: [
-          this.cfg.appendSystemPrompt,
-          buildGoalSystemPrompt(goal, maxRounds),
-        ].filter(Boolean).join('\n\n'),
+        ...overrides,
+        appendSystemPrompt: [opts.appendSystemPrompt, buildGoalSystemPrompt(goal, maxRounds)].filter(Boolean).join('\n\n'),
         maxTurns: turnsPerRound,
-        // Never re-enter the goal guard from inside a goal round.
-        goal: {
-          ...(typeof this.cfg.goal === 'object' ? this.cfg.goal : {}),
-          enabledOnQuery: false,
-        },
       }
-
-      for await (const ev of this.query(roundTarget, roundOverrides)) {
-        yield ev
+      let result: SDKResultMessage | undefined
+      for await (const event of this.queryOnce(round === 0 ? goal : 'Continue working toward the goal. Report complete only when finished, or blocked when unable to proceed.', roundOverrides, budget, [goalTool])) {
+        if (event.type === 'result') result = event
+        else yield event
       }
-
-      const state = getGoalState()
-      // If the model reported complete/blocked, stop.
-      if (state.revision > lastRevision) {
-        consecutiveStalls = 0
-        if (state.status === 'complete' || state.status === 'blocked') {
-          yield {
-            type: 'result',
-            subtype: state.status === 'complete' ? 'success' : 'goal_blocked',
-            num_turns: roundsDone + 1,
-            errors: state.status === 'blocked' ? [state.summary || 'Goal blocked'] : undefined,
-          } as SDKMessage
-          return
+      if (result) {
+        turns += result.num_turns ?? 0
+        apiTime += result.duration_api_ms ?? 0
+        if (result.subtype !== 'success' && result.subtype !== 'error_max_turns') {
+          terminal = result
+          break
         }
-        lastRevision = state.revision
-      } else {
-        // No status update this round.
-        consecutiveStalls++
-        if (maxConsecutiveStalls && consecutiveStalls >= maxConsecutiveStalls) {
-          yield {
-            type: 'result',
-            subtype: 'goal_blocked',
-            num_turns: roundsDone + 1,
-            errors: [`No progress reported for ${consecutiveStalls} consecutive rounds.`],
-          } as SDKMessage
-          return
+      }
+      if (this.abortCtrl!.signal.aborted) {
+        terminal = { type: 'result', subtype: 'cancelled', errors: ['Run cancelled'] }
+        break
+      }
+      const report = getGoalState(state)
+      if (report.revision > lastRevision) {
+        stalls = 0
+        lastRevision = report.revision
+        if (report.status === 'complete' || report.status === 'blocked') {
+          terminal = { type: 'result', subtype: report.status === 'complete' ? 'success' : 'goal_blocked', errors: report.status === 'blocked' ? [report.summary || 'Goal blocked'] : undefined }
+          break
         }
+      } else if (maxStalls && ++stalls >= maxStalls) {
+        terminal = { type: 'result', subtype: 'goal_blocked', errors: [`No progress reported for ${stalls} consecutive rounds`] }
+        break
       }
     }
-
-    // Rounds exhausted without completion.
-    yield {
-      type: 'result',
-      subtype: 'error_max_rounds',
-      num_turns: roundsDone,
-      errors: [`Goal not completed after ${maxRounds} rounds.`],
-    } as SDKMessage
+    yield { ...terminal, session_id: this.sid, is_error: terminal.subtype !== 'success', num_turns: turns,
+      usage: { ...budget.usage }, total_cost_usd: budget.cost, cost: budget.cost, duration_api_ms: apiTime,
+      model_usage: budget.modelUsage ? structuredClone(budget.modelUsage) : undefined }
   }
 
   /**
@@ -536,10 +479,19 @@ export class Agent {
     return [...this.messageLog]
   }
 
+  /** Pass this session handle to built-in state helpers such as setQuestionHandler. */
+  getToolState(): Map<string, unknown> {
+    return this.sessionState
+  }
+
   /**
    * Reset conversation history.
    */
   clear(): void {
+    if (this.activeRun) throw new Error('Cannot clear an active query or goal')
+    clearTasks(this.sessionState)
+    this.sessionState.clear()
+    setMcpConnections(this.mcpLinks, this.sessionState)
     this.history = []
     this.messageLog = []
   }
@@ -597,9 +549,10 @@ export class Agent {
    * Stop a background task.
    */
   async stopTask(taskId: string): Promise<void> {
-    const { getTask } = await import('./tools/task-tools.js')
-    const task = getTask(taskId)
-    if (task) {
+    const { getTask, stopTaskExecution } = await import('./tools/task-tools.js')
+    await stopTaskExecution(taskId, this.sessionState)
+    const task = getTask(taskId, this.sessionState)
+    if (task && !task.kind) {
       task.status = 'cancelled'
     }
   }
@@ -609,6 +562,11 @@ export class Agent {
    * Optionally persist session to disk.
    */
   async close(): Promise<void> {
+    if (this.closed) return
+    if (this.activeRun) throw new Error('Interrupt and finish the active query before closing the Agent')
+    this.closed = true
+    await this.setupDone
+    await settleTaskGroup(new Set(getAllTasks(this.sessionState).filter(task => task.kind).map(task => task.id)), this.sessionState, true)
     // Persist session if enabled
     if (this.cfg.persistSession !== false && this.history.length > 0) {
       try {

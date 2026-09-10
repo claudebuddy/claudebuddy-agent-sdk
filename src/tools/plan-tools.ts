@@ -1,3 +1,4 @@
+import { sessionStore, type SessionState } from './session-state.js'
 /**
  * Plan Mode Tools
  *
@@ -5,18 +6,18 @@
  * Allows the agent to enter a design/planning phase before execution.
  */
 
-import type { ToolDefinition, ToolResult } from '../types.js'
+import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 
 // Track plan mode state
-let planModeActive = false
-let currentPlan: string | null = null
 
-export function isPlanModeActive(): boolean {
-  return planModeActive
+export function isPlanModeActive(sessionState?: SessionState): boolean {
+  const state = getState(sessionState)
+  return state.planModeActive
 }
 
-export function getCurrentPlan(): string | null {
-  return currentPlan
+export function getCurrentPlan(sessionState?: SessionState): string | null {
+  const state = getState(sessionState)
+  return state.currentPlan
 }
 
 export const EnterPlanModeTool: ToolDefinition = {
@@ -30,8 +31,9 @@ export const EnterPlanModeTool: ToolDefinition = {
   isConcurrencySafe: () => false,
   isEnabled: () => true,
   async prompt() { return 'Enter plan mode for structured planning.' },
-  async call(): Promise<ToolResult> {
-    if (planModeActive) {
+  async call(_input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
+    if (state.planModeActive) {
       return {
         type: 'tool_result',
         tool_use_id: '',
@@ -39,8 +41,8 @@ export const EnterPlanModeTool: ToolDefinition = {
       }
     }
 
-    planModeActive = true
-    currentPlan = null
+    state.planModeActive = true
+    state.currentPlan = null
 
     return {
       type: 'tool_result',
@@ -64,8 +66,9 @@ export const ExitPlanModeTool: ToolDefinition = {
   isConcurrencySafe: () => false,
   isEnabled: () => true,
   async prompt() { return 'Exit plan mode with a completed plan.' },
-  async call(input: any): Promise<ToolResult> {
-    if (!planModeActive) {
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
+    if (!state.planModeActive) {
       return {
         type: 'tool_result',
         tool_use_id: '',
@@ -74,15 +77,22 @@ export const ExitPlanModeTool: ToolDefinition = {
       }
     }
 
-    planModeActive = false
-    currentPlan = input.plan || null
+    state.planModeActive = false
+    state.currentPlan = input.plan || null
 
     const status = input.approved !== false ? 'approved' : 'pending approval'
 
     return {
       type: 'tool_result',
       tool_use_id: '',
-      content: `Plan mode exited. Plan status: ${status}.${currentPlan ? `\n\nPlan:\n${currentPlan}` : ''}`,
+      content: `Plan mode exited. Plan status: ${status}.${state.currentPlan ? `\n\nPlan:\n${state.currentPlan}` : ''}`,
     }
   },
+}
+
+function getState(sessionState?: SessionState) {
+  return sessionStore(sessionState, 'plan-tools', () => ({
+    planModeActive: false,
+    currentPlan: null as string | null,
+  }))
 }

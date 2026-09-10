@@ -1,3 +1,4 @@
+import { sessionStore, type SessionState } from './session-state.js'
 /**
  * SendMessageTool - Inter-agent messaging
  *
@@ -5,7 +6,7 @@
  * between teammates in a multi-agent setup.
  */
 
-import type { ToolDefinition, ToolResult } from '../types.js'
+import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 
 /**
  * Message inbox for inter-agent communication.
@@ -18,31 +19,33 @@ export interface AgentMessage {
   type: 'text' | 'shutdown_request' | 'shutdown_response' | 'plan_approval_response'
 }
 
-const mailboxes = new Map<string, AgentMessage[]>()
 
 /**
  * Read messages from a mailbox.
  */
-export function readMailbox(agentName: string): AgentMessage[] {
-  const messages = mailboxes.get(agentName) || []
-  mailboxes.set(agentName, []) // Clear after reading
+export function readMailbox(agentName: string, sessionState?: SessionState): AgentMessage[] {
+  const state = getState(sessionState)
+  const messages = state.mailboxes.get(agentName) || []
+  state.mailboxes.set(agentName, []) // Clear after reading
   return messages
 }
 
 /**
  * Write to a mailbox.
  */
-export function writeToMailbox(agentName: string, message: AgentMessage): void {
-  const messages = mailboxes.get(agentName) || []
+export function writeToMailbox(agentName: string, message: AgentMessage, sessionState?: SessionState): void {
+  const state = getState(sessionState)
+  const messages = state.mailboxes.get(agentName) || []
   messages.push(message)
-  mailboxes.set(agentName, messages)
+  state.mailboxes.set(agentName, messages)
 }
 
 /**
- * Clear all mailboxes.
+ * Clear all state.mailboxes.
  */
-export function clearMailboxes(): void {
-  mailboxes.clear()
+export function clearMailboxes(sessionState?: SessionState): void {
+  const state = getState(sessionState)
+  state.mailboxes.clear()
 }
 
 export const SendMessageTool: ToolDefinition = {
@@ -65,7 +68,8 @@ export const SendMessageTool: ToolDefinition = {
   isConcurrencySafe: () => true,
   isEnabled: () => true,
   async prompt() { return 'Send a message to another agent.' },
-  async call(input: any): Promise<ToolResult> {
+  async call(input: any, context?: ToolContext): Promise<ToolResult> {
+    const state = getState(context?.sessionState)
     const message: AgentMessage = {
       from: 'self',
       to: input.to,
@@ -75,9 +79,9 @@ export const SendMessageTool: ToolDefinition = {
     }
 
     if (input.to === '*') {
-      // Broadcast to all known mailboxes
-      for (const [name] of mailboxes) {
-        writeToMailbox(name, { ...message, to: name })
+      // Broadcast to all known state.mailboxes
+      for (const [name] of state.mailboxes) {
+        writeToMailbox(name, { ...message, to: name }, context?.sessionState)
       }
       return {
         type: 'tool_result',
@@ -86,11 +90,17 @@ export const SendMessageTool: ToolDefinition = {
       }
     }
 
-    writeToMailbox(input.to, message)
+    writeToMailbox(input.to, message, context?.sessionState)
     return {
       type: 'tool_result',
       tool_use_id: '',
       content: `Message sent to ${input.to}`,
     }
   },
+}
+
+function getState(sessionState?: SessionState) {
+  return sessionStore(sessionState, 'send-message', () => ({
+    mailboxes: new Map<string, AgentMessage[]>(),
+  }))
 }

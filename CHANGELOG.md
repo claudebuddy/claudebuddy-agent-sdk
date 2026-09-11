@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-09-11
 
 - Add an opt-in in-process scheduler for recurring cron and one-shot Agent prompts.
 - Add durable definitions, bounded run history, restart catch-up, local single-writer

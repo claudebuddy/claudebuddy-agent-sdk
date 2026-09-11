@@ -197,7 +197,9 @@ export class Scheduler {
 
   private async skip(job: ScheduledJob, status: 'skipped_misfire', scheduledAt: string): Promise<void> {
     const run: ScheduledRun = { id: crypto.randomUUID(), scheduledAt, finishedAt: this.iso(), trigger: 'scheduled', status }
-    this.addRun(job, run); this.advance(job); await this.persist(); await this.emitRun('run_skipped_misfire', job.id, run.id)
+    this.addRun(job, run); this.advance(job)
+    if (job.runAt) job.status = 'completed'
+    await this.persist(); await this.emitRun('run_skipped_misfire', job.id, run.id)
   }
 
   private finishCancelled(jobId: string, runId: string): void {

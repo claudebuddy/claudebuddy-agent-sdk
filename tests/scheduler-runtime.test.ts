@@ -1,7 +1,11 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 import { Scheduler } from '../src/scheduler/scheduler.js'
+import { SchedulerStorage } from '../src/scheduler/storage.js'
 import type { QueryResult } from '../src/types.js'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 const success = (text = 'ok'): QueryResult => ({ text, subtype: 'success', is_error: false, total_cost_usd: 0, usage: { input_tokens: 1, output_tokens: 1 }, num_turns: 1, duration_ms: 1, messages: [] })
 const future = () => new Date(Date.now() + 3_600_000).toISOString()
@@ -86,4 +90,21 @@ test('close cancels active execution and rejects later admission', async () => {
   await scheduler.close()
   assert.equal(aborted, true)
   await assert.rejects(scheduler.list(), /closed/)
+})
+
+test('an expired one-shot outside the catch-up window becomes completed', async t => {
+  const root = await mkdtemp(join(tmpdir(), 'scheduler-recovery-'))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const storage = new SchedulerStorage('expired', root)
+  await storage.save([{
+    id: 'old', name: 'old', prompt: 'work', runAt: '2026-01-01T00:00:00.000Z', timeZone: 'UTC',
+    status: 'enabled', createdAt: '2025-01-01T00:00:00.000Z', updatedAt: '2025-01-01T00:00:00.000Z',
+    nextRunAt: '2026-01-01T00:00:00.000Z', runs: [],
+  }])
+  const scheduler = new Scheduler('expired', { enabled: true, maxCatchUpAgeMs: 1 }, { storage, execute: async () => success(), now: () => new Date('2026-09-11T00:00:00.000Z') })
+  await scheduler.start()
+  const job = await scheduler.get('old')
+  assert.equal(job?.status, 'completed')
+  assert.equal(job?.runs[0].status, 'skipped_misfire')
+  await scheduler.close()
 })

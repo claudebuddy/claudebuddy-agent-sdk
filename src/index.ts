@@ -455,3 +455,6 @@ export type {
 export { appendSessionEvent, readSessionEvents } from './session.js'
 export type { SessionEvent } from './session.js'
 export type { ProviderStreamEvent } from './providers/types.js'
+
+export type { UserMessageReceipt, QuestionRequest, PendingQuestion, QuestionAnswer, SDKInteractionMessage } from './types.js'
+export type { QuestionHandler } from './tools/ask-user.js'

@@ -247,11 +247,14 @@ export class QueryEngine {
       while (this.turnCount < this.config.maxTurns) {
         this.config.abortSignal?.throwIfAborted()
         if (atBudget()) { status = 'error_max_budget_usd'; break }
+        yield* this.consumeUserInput()
         if (shouldAutoCompact(this.messages, this.config.model, this.compactState, this.config.contextWindowSize)) {
           await compact()
         }
         this.config.abortSignal?.throwIfAborted()
         if (atBudget()) { status = 'error_max_budget_usd'; break }
+        yield* this.consumeUserInput()
+        this.config.abortSignal?.throwIfAborted()
         const apiMessages = microCompactMessages(normalizeMessagesForAPI(this.messages)) as NormalizedMessageParam[]
         this.turnCount++
         let response: CreateMessageResponse
@@ -310,6 +313,8 @@ export class QueryEngine {
             output: typeof r.content === 'string' ? r.content : JSON.stringify(r.content),
           } }
           this.config.abortSignal?.throwIfAborted()
+        } else if (this.config.inputController?.hasPending()) {
+          continue
         } else if (response.stopReason === 'max_tokens') {
           if (outputRecoveryAttempts++ >= 3) {
             status = 'error_during_execution'; errors = ['Maximum output recovery attempts exceeded']; break
@@ -351,6 +356,22 @@ export class QueryEngine {
     }
   }
 
+  private async *consumeUserInput(): AsyncGenerator<SDKMessage> {
+    const input = this.config.inputController
+    while (input?.hasPending()) {
+      for (const receipt of input.take()) {
+        this.config.abortSignal?.throwIfAborted()
+        const hooks = await this.executeHooks('UserPromptSubmit', { toolInput: receipt.text })
+        this.config.abortSignal?.throwIfAborted()
+        const blocked = hooks.find(hook => hook.block)
+        const reason = blocked ? blocked.message || 'Blocked by UserPromptSubmit hook' : undefined
+        if (!blocked) this.messages.push({ role: 'user', content: receipt.text })
+        input.settle(receipt.id, !blocked, reason)
+        yield { type: 'system', subtype: 'user_message', id: receipt.id, text: receipt.text, status: blocked ? 'not_applied' : 'applied', reason }
+      }
+    }
+  }
+
   private chargeUsage(usage: TokenUsage): void {
     this.ledger.modelUsage ??= {}
     const modelUsage = this.ledger.modelUsage[this.config.model] ??= { input_tokens: 0, output_tokens: 0 }
@@ -373,6 +394,8 @@ export class QueryEngine {
     toolUseBlocks: ToolUseBlock[],
   ): Promise<(ToolResult & { tool_name?: string })[]> {
     const context: ToolContext = {
+      askQuestion: this.config.askQuestion,
+      questionTimeoutMs: this.config.questionTimeoutMs,
       taskGroup: this.taskGroup,
       cwd: this.config.cwd,
       abortSignal: this.config.abortSignal,
@@ -508,6 +531,9 @@ export class QueryEngine {
       }
     }
 
+    const superseded = (): ToolResult & { tool_name: string } => ({ type: 'tool_result', tool_use_id: block.id, tool_name: block.name, content: 'Tool call superseded by new user input; not executed.', is_error: true })
+    if (this.config.inputController?.hasPending()) return superseded()
+
     // Check permissions
     if (this.config.canUseTool) {
       try {
@@ -537,6 +563,8 @@ export class QueryEngine {
 
     if (context.abortSignal?.aborted) return cancelled()
 
+    if (this.config.inputController?.hasPending()) return superseded()
+
     // Hook: PreToolUse
     const preHookResults = await this.executeHooks('PreToolUse', {
       toolName: block.name,
@@ -558,6 +586,7 @@ export class QueryEngine {
     // Execute the tool
     try {
       if (context.abortSignal?.aborted) return cancelled()
+      if (this.config.inputController?.hasPending()) return superseded()
       const result = await tool.call(block.input, context)
 
       // Hook: PostToolUse

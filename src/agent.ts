@@ -28,6 +28,8 @@ import type {
   Message,
   PermissionMode,
 } from './types.js'
+import { RunInteraction } from './interaction.js'
+import type { UserMessageReceipt, QuestionAnswer, PendingQuestion } from './types.js'
 import { QueryEngine } from './engine.js'
 import { getAllBaseTools, filterTools } from './tools/index.js'
 import { clearTasks, getAllTasks, settleTaskGroup } from './tools/task-tools.js'
@@ -71,6 +73,8 @@ export class Agent {
   private currentEngine: QueryEngine | null = null
   private hookRegistry: HookRegistry
   private sessionState = new Map<string, unknown>()
+  private interaction: RunInteraction | null = null
+  private inputReceipts = new Map<string, UserMessageReceipt>()
   private activeRun = false
   private closed = false
 
@@ -278,6 +282,8 @@ export class Agent {
     this.activeRun = true
     const controller = new AbortController()
     this.abortCtrl = controller
+    const interaction = new RunInteraction(this.inputReceipts)
+    this.interaction = interaction
     const sources = new Set([opts.abortSignal, opts.abortController?.signal].filter((signal): signal is AbortSignal => !!signal))
     const listeners: Array<() => void> = []
     for (const source of sources) {
@@ -291,16 +297,32 @@ export class Agent {
     const budget: ExecutionBudget = { cost: 0, usage: { input_tokens: 0, output_tokens: 0 } }
     try {
       await this.setupDone
-      for await (const event of run(budget)) {
+      for await (const event of interaction.merge(run(budget), () => controller.abort())) {
+        if (event.type === 'result') {
+          interaction.finish()
+          let pendingEvent: SDKMessage | undefined
+          while ((pendingEvent = interaction.shiftEvent())) {
+            if (opts.persistSession !== false) await appendSessionEvent(this.sid, pendingEvent)
+            yield pendingEvent
+          }
+        }
         if (opts.persistSession !== false) await appendSessionEvent(this.sid, event)
         yield event
       }
     } finally {
-      controller.abort()
-      for (const remove of listeners) remove()
-      this.currentEngine = null
-      this.abortCtrl = null
-      this.activeRun = false
+      interaction.finish()
+      try {
+        if (opts.persistSession !== false) {
+          for (const event of interaction.drain()) await appendSessionEvent(this.sid, event)
+        }
+      } finally {
+        this.interaction = null
+        controller.abort()
+        for (const remove of listeners) remove()
+        this.currentEngine = null
+        this.abortCtrl = null
+        this.activeRun = false
+      }
     }
   }
 
@@ -344,6 +366,9 @@ export class Agent {
       })
     }
     const engine = new QueryEngine({
+      inputController: this.interaction ?? undefined,
+      askQuestion: opts.interactive ? this.interaction!.ask.bind(this.interaction) : undefined,
+      questionTimeoutMs: opts.questionTimeoutMs,
       cwd, model: opts.model || this.modelId, provider, tools, systemPrompt,
       appendSystemPrompt, maxTurns: opts.maxTurns ?? 10,
       maxBudgetUsd: opts.maxBudgetUsd, executionBudget: budget,
@@ -363,6 +388,9 @@ export class Agent {
         if (event.type === 'system' && event.subtype === 'init' && !userRecorded) {
           this.messageLog.push({ type: 'user', message: { role: 'user', content: prompt }, uuid: crypto.randomUUID(), timestamp: new Date().toISOString() })
           userRecorded = true
+        }
+        if (event.type === 'system' && event.subtype === 'user_message' && event.status === 'applied') {
+          this.messageLog.push({ type: 'user', message: { role: 'user', content: event.text }, uuid: event.id, timestamp: new Date().toISOString() })
         }
         if (event.type === 'assistant') {
           this.messageLog.push({ type: 'assistant', message: event.message, uuid: crypto.randomUUID(), timestamp: new Date().toISOString() })
@@ -490,10 +518,34 @@ export class Agent {
   clear(): void {
     if (this.activeRun) throw new Error('Cannot clear an active query or goal')
     clearTasks(this.sessionState)
+    this.inputReceipts.clear()
     this.sessionState.clear()
     setMcpConnections(this.mcpLinks, this.sessionState)
     this.history = []
     this.messageLog = []
+  }
+
+  /** Queue steering input for the current run; returns a receipt ID immediately. */
+  sendMessage(text: string): string {
+    if (!this.activeRun || !this.interaction || this.abortCtrl?.signal.aborted) throw new Error('Agent has no active input window')
+    return this.interaction.send(text)
+  }
+
+  getMessageStatus(id: string): UserMessageReceipt | undefined {
+    const receipt = this.inputReceipts.get(id)
+    return receipt ? { ...receipt } : undefined
+  }
+
+  getPendingQuestions(): PendingQuestion[] { return this.interaction?.pendingQuestions() ?? [] }
+
+  answerQuestion(id: string, answer: QuestionAnswer): void {
+    if (!this.interaction) throw new Error('Question is not pending in this Agent')
+    this.interaction.answer(id, answer)
+  }
+
+  cancelQuestion(id: string): void {
+    if (!this.interaction) throw new Error('Question is not pending in this Agent')
+    this.interaction.cancel(id)
   }
 
   /**

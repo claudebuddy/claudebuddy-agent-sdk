@@ -1,3 +1,4 @@
+import { waitForQuestion } from '../interaction.js'
 import { sessionStore, type SessionState } from './session-state.js'
 /**
  * AskUserQuestionTool - Interactive user questions
@@ -9,13 +10,15 @@ import { sessionStore, type SessionState } from './session-state.js'
 
 import type { ToolDefinition, ToolContext, ToolResult } from '../types.js'
 
-// Callback for handling user questions (set by the agent)
+export type QuestionHandler = (question: string, options?: string[], context?: { signal: AbortSignal; allowMultiselect: boolean }) => Promise<string>
+
+// Callback for handling user questions (set by the host)
 
 /**
  * Set the question handler for AskUserQuestion.
  */
 export function setQuestionHandler(
-  handler: (question: string, options?: string[]) => Promise<string>,
+  handler: QuestionHandler,
   sessionState?: SessionState,
 ): void {
   const state = getState(sessionState)
@@ -55,9 +58,12 @@ export const AskUserQuestionTool: ToolDefinition = {
   async prompt() { return 'Ask the user a question.' },
   async call(input: any, context?: ToolContext): Promise<ToolResult> {
     const state = getState(context?.sessionState)
-    if (state.questionHandler) {
+    if (state.questionHandler || context?.askQuestion) {
       try {
-        const answer = await state.questionHandler(input.question, input.options)
+        const handler = state.questionHandler
+        const answer = await waitForQuestion(signal => handler
+          ? handler(input.question, input.options, { signal, allowMultiselect: input.allow_multiselect === true })
+          : context!.askQuestion!({ question: input.question, options: input.options, allow_multiselect: input.allow_multiselect === true }, signal), context?.abortSignal, context?.questionTimeoutMs)
         return {
           type: 'tool_result',
           tool_use_id: '',
@@ -67,7 +73,7 @@ export const AskUserQuestionTool: ToolDefinition = {
         return {
           type: 'tool_result',
           tool_use_id: '',
-          content: `User declined to answer: ${err.message}`,
+          content: `Question unanswered: ${err.message}`,
           is_error: true,
         }
       }
@@ -84,6 +90,6 @@ export const AskUserQuestionTool: ToolDefinition = {
 
 function getState(sessionState?: SessionState) {
   return sessionStore(sessionState, 'ask-user', () => ({
-    questionHandler: null as ((question: string, options?: string[]) => Promise<string>) | null,
+    questionHandler: null as QuestionHandler | null,
   }))
 }

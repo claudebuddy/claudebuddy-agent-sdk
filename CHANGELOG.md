@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.6.0 — 2026-09-11
+
+- Add queued execution-time user instructions with receipt events, hook checks and
+  safe-boundary replanning; skip superseded tool calls before permissions/execution.
+- Add opt-in interactive question events, answer/cancel methods, per-question IDs,
+  multiselect, timeout and cancellation for broker and legacy callback waits.
+- Deliver child questions through a pull-driven event merger and persist cleanup
+  interaction events when a consumer closes the stream early.
+
+- Add 18 interaction regression tests; all 87 offline tests pass.
+
 ## 0.5.0 — 2026-09-10
 
 - Apply tool permissions consistently to built-in, MCP, override and child tools;

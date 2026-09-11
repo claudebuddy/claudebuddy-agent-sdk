@@ -123,6 +123,8 @@ export const AgentTool: ToolDefinition = {
 
     // Create subagent engine
     const engine = new QueryEngine({
+      askQuestion: context.askQuestion,
+      questionTimeoutMs: context.questionTimeoutMs,
       cwd: context.cwd,
       model: subModel,
       provider,

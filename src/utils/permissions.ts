@@ -31,6 +31,7 @@ export function createPermissionPolicy(
 }
 
 export function validateRunOptions(options: AgentOptions): void {
+  if (options.questionTimeoutMs !== undefined && (!Number.isFinite(options.questionTimeoutMs) || options.questionTimeoutMs < 1 || options.questionTimeoutMs > 2147483647)) throw new Error('questionTimeoutMs must be between 1 and 2147483647')
   const sandbox = options.sandbox
   if (sandbox && (sandbox.enabled === true || Object.entries(sandbox).some(([key, value]) => key !== 'enabled' && value !== undefined))) {
     throw new Error('Sandbox enforcement is not supported by this in-process runtime')

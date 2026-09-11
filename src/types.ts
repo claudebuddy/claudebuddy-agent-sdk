@@ -52,7 +52,26 @@ export type Message = UserMessage | AssistantMessage
 // SDK Message Types (streaming events)
 // --------------------------------------------------------------------------
 
+export interface UserMessageReceipt {
+  id: string
+  text: string
+  status: 'queued' | 'applied' | 'not_applied'
+  reason?: string
+}
+export interface QuestionRequest {
+  question: string
+  options?: string[]
+  allow_multiselect?: boolean
+}
+export interface PendingQuestion extends QuestionRequest { question_id: string }
+export type QuestionAnswer = string | string[]
+export type SDKInteractionMessage =
+  | ({ type: 'system'; subtype: 'user_message' } & UserMessageReceipt)
+  | ({ type: 'system'; subtype: 'question' } & PendingQuestion)
+  | { type: 'system'; subtype: 'question_closed'; question_id: string; status: 'answered' | 'cancelled' | 'timed_out' }
+
 export type SDKMessage =
+  | SDKInteractionMessage
   | SDKAssistantMessage
   | SDKToolResultMessage
   | SDKResultMessage
@@ -200,6 +219,8 @@ export interface ToolInputSchema {
 }
 
 export interface ToolContext {
+  askQuestion?: (request: QuestionRequest, signal: AbortSignal) => Promise<string>
+  questionTimeoutMs?: number
   /** Engine-owned background tasks, drained before the run result. */
   taskGroup?: Set<string>
   cwd: string
@@ -406,6 +427,10 @@ export interface AgentOptions {
   abortSignal?: AbortSignal
   /** Whether to include partial streaming events */
   includePartialMessages?: boolean
+  /** Emit answerable question events instead of non-interactive fallback. */
+  interactive?: boolean
+  /** Positive question wait limit in milliseconds (default 300000). */
+  questionTimeoutMs?: number
   /** Environment variables */
   env?: Record<string, string | undefined>
   /** Tool names to pre-approve without prompting */
@@ -545,6 +570,9 @@ export interface QueryResult {
 // --------------------------------------------------------------------------
 
 export interface QueryEngineConfig {
+  inputController?: import('./interaction.js').InputController
+  askQuestion?: ToolContext['askQuestion']
+  questionTimeoutMs?: number
   cwd: string
   model: string
   /** LLM provider instance (created from apiType) */

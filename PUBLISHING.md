@@ -18,7 +18,7 @@ npm 包 `@claudebuddy/claudebuddy-agent-sdk` 已发布到两个平台：
 ```bash
 npm install @claudebuddy/claudebuddy-agent-sdk
 # 或指定版本
-npm install @claudebuddy/claudebuddy-agent-sdk@0.5.0
+npm install @claudebuddy/claudebuddy-agent-sdk@0.6.0
 ```
 
 > 默认走官方 npm registry。若你的环境把默认 registry 换成了镜像（如 `npmmirror`），

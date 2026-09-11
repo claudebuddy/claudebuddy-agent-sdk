@@ -485,6 +485,14 @@ Start the web UI:
 npx tsx examples/web/server.ts
 ```
 
+## Execution-time interaction
+
+Use `agent.sendMessage(text)` to queue steering instructions during an active query.
+Enable `interactive: true` to receive question events and answer them with
+`agent.answerQuestion(id, answer)`. Existing multi-turn queries and question callbacks
+remain supported. See [runtime interaction](docs/runtime-interaction.md) for receipts,
+UI integration, timeouts, cancellation and persistence limits.
+
 ## Background tasks
 
 `Bash` and `Agent` support `run_in_background: true`, returning a `task_id` for

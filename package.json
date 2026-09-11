@@ -27,6 +27,7 @@
     "LICENSE",
     "docs/background-tasks.md",
     "docs/runtime-progress.md",
+    "docs/scheduler.md",
     "CHANGELOG.md",
     "docs/runtime-interaction.md"
   ],

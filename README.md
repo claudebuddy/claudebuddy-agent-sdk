@@ -92,6 +92,26 @@ console.log(result.text);
 
 The `apiType` is auto-detected from model name — models containing `gpt-`, `o1`, `o3`, `deepseek`, `qwen`, `mistral`, etc. automatically use `openai-completions`.
 
+### Scheduled prompts
+
+```typescript
+const agent = createAgent({
+  scheduler: { enabled: true, timeZone: "Asia/Shanghai" },
+});
+
+await agent.createSchedule({
+  name: "daily review",
+  prompt: "Review the project and report actionable problems.",
+  cron: "0 9 * * *",
+});
+
+await agent.close();
+```
+
+Schedules are recoverable when session persistence is enabled, do not overlap the
+same job, and run only while the owning process is alive. See
+[session scheduler](./docs/scheduler.md) for lifecycle and recovery semantics.
+
 ### Multi-turn conversation
 
 ```typescript

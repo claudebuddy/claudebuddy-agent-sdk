@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Add an opt-in in-process scheduler for recurring cron and one-shot Agent prompts.
+- Add durable definitions, bounded run history, restart catch-up, local single-writer
+  locking, FIFO concurrency limits, same-job overlap protection, and shutdown cancellation.
+- Add host scheduling methods and six model tools while keeping RemoteTrigger disabled.
+
 ## 0.6.0 — 2026-09-11
 
 - Add queued execution-time user instructions with receipt events, hook checks and

@@ -28,6 +28,8 @@ import type {
   Message,
   PermissionMode,
 } from './types.js'
+import type { ScheduleInput, SchedulePatch, ScheduledJob } from './scheduler/types.js'
+import { Scheduler } from './scheduler/scheduler.js'
 import { RunInteraction } from './interaction.js'
 import type { UserMessageReceipt, QuestionAnswer, PendingQuestion } from './types.js'
 import { QueryEngine } from './engine.js'
@@ -77,6 +79,7 @@ export class Agent {
   private inputReceipts = new Map<string, UserMessageReceipt>()
   private activeRun = false
   private closed = false
+  private scheduler: Scheduler | null = null
 
   constructor(options: AgentOptions = {}) {
     validateRunOptions(options)
@@ -255,6 +258,51 @@ export class Agent {
         this.sid = this.cfg.resume
       }
     }
+
+    if (this.cfg.scheduler?.enabled) {
+      const configuredEvent = this.cfg.scheduler.onEvent
+      this.scheduler = new Scheduler(this.sid, {
+        ...this.cfg.scheduler,
+        onEvent: async event => {
+          await configuredEvent?.(event)
+          if (this.cfg.persistSession !== false) {
+            await appendSessionEvent(this.sid, {
+              type: 'system', subtype: 'status', message: `scheduler:${JSON.stringify(event)}`,
+            })
+          }
+        },
+      }, {
+        persistent: this.cfg.persistSession !== false,
+        execute: (job, signal) => this.executeScheduledJob(job, signal),
+      })
+      await this.scheduler.start()
+    }
+  }
+
+  /** Execute a scheduled prompt without touching the owning Agent's run state. */
+  private async executeScheduledJob(job: ScheduledJob, signal: AbortSignal): Promise<QueryResult> {
+    const schedulerTools = new Set(['CronCreate', 'CronList', 'CronGet', 'CronUpdate', 'CronRun', 'CronDelete'])
+    const childOptions: AgentOptions = {
+      ...this.cfg,
+      model: job.model ?? this.modelId,
+      maxTurns: job.maxTurns ?? this.cfg.maxTurns,
+      maxBudgetUsd: job.maxBudgetUsd ?? this.cfg.maxBudgetUsd,
+      tools: this.toolPool.filter(tool => !schedulerTools.has(tool.name)),
+      mcpServers: undefined,
+      scheduler: undefined,
+      sessionId: `${this.sid}_${job.id}_${crypto.randomUUID()}`,
+      resume: undefined,
+      continue: false,
+      history: [],
+      persistSession: false,
+      interactive: false,
+      abortController: undefined,
+      abortSignal: signal,
+    }
+    const child = new Agent(childOptions)
+    ;(child as any).provider = this.provider
+    try { return await child.prompt(job.prompt) }
+    finally { await child.close() }
   }
 
   /** Run one query, or an explicitly configured goal, with exclusive session ownership. */
@@ -597,6 +645,19 @@ export class Agent {
     return this.apiType
   }
 
+  private async requireScheduler(): Promise<Scheduler> {
+    await this.setupDone
+    if (!this.scheduler) throw new Error(this.closed ? 'Agent is closed' : 'Scheduler is not enabled')
+    return this.scheduler
+  }
+
+  async createSchedule(input: ScheduleInput): Promise<ScheduledJob> { return (await this.requireScheduler()).create(input) }
+  async listSchedules(): Promise<ScheduledJob[]> { return (await this.requireScheduler()).list() }
+  async getSchedule(id: string): Promise<ScheduledJob | undefined> { return (await this.requireScheduler()).get(id) }
+  async updateSchedule(id: string, patch: SchedulePatch): Promise<ScheduledJob> { return (await this.requireScheduler()).update(id, patch) }
+  async runSchedule(id: string): Promise<string> { return (await this.requireScheduler()).runNow(id) }
+  async deleteSchedule(id: string): Promise<boolean> { return (await this.requireScheduler()).delete(id) }
+
   /**
    * Stop a background task.
    */
@@ -618,6 +679,7 @@ export class Agent {
     if (this.activeRun) throw new Error('Interrupt and finish the active query before closing the Agent')
     this.closed = true
     await this.setupDone
+    await this.scheduler?.close()
     await settleTaskGroup(new Set(getAllTasks(this.sessionState).filter(task => task.kind).map(task => task.id)), this.sessionState, true)
     // Persist session if enabled
     if (this.cfg.persistSession !== false && this.history.length > 0) {

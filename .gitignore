@@ -3,6 +3,7 @@ dist/
 *.log
 *.tsbuildinfo
 .DS_Store
+.worktrees/
 .env
 .env.*
 !.env.example

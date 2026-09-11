@@ -37,3 +37,13 @@ test('closing Agent closes the scheduler before rejecting further calls', async 
   await agent.close()
   await assert.rejects(agent.listSchedules(), /closed|not enabled/)
 })
+
+test('enabled Agent advertises all local scheduler tools but not RemoteTrigger', async t => {
+  let names: string[] = []
+  const agent = new Agent({ apiType: 'openai-completions', apiKey: 'unused', persistSession: false, scheduler: { enabled: true }, maxTurns: 1 })
+  ;(agent as any).provider = { apiType: 'openai-completions', createMessage: async (params: any) => { names = params.tools.map((tool: any) => tool.name); return done() } }
+  t.after(() => agent.close())
+  await agent.prompt('inspect')
+  for (const name of ['CronCreate', 'CronList', 'CronGet', 'CronUpdate', 'CronRun', 'CronDelete']) assert.ok(names.includes(name), name)
+  assert.equal(names.includes('RemoteTrigger'), false)
+})

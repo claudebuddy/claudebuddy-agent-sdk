@@ -268,12 +268,12 @@ export class Agent {
       this.scheduler = new Scheduler(this.sid, {
         ...this.cfg.scheduler,
         onEvent: async event => {
-          await configuredEvent?.(event)
           if (this.cfg.persistSession !== false) {
             await appendSessionEvent(this.sid, {
               type: 'system', subtype: 'status', message: `scheduler:${JSON.stringify(event)}`,
             })
           }
+          await configuredEvent?.(event)
         },
       }, {
         persistent: this.cfg.persistSession !== false,

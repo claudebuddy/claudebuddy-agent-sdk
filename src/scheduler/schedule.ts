@@ -51,6 +51,9 @@ export function validateScheduleInput(input: ScheduleInput, now = new Date()): S
   const timeZone = validateTimeZone(input.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone)
   if (input.cron) nextCronOccurrence(input.cron, timeZone, now)
   if (input.runAt) {
+    if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(input.runAt)) {
+      throw new Error('runAt must be a valid ISO 8601 timestamp with a time-zone offset')
+    }
     const timestamp = Date.parse(input.runAt)
     if (!Number.isFinite(timestamp)) throw new Error('runAt must be a valid ISO 8601 timestamp')
     if (timestamp <= now.getTime()) throw new Error('runAt must be in the future')

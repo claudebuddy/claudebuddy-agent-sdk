@@ -108,3 +108,15 @@ test('an expired one-shot outside the catch-up window becomes completed', async 
   assert.equal(job?.runs[0].status, 'skipped_misfire')
   await scheduler.close()
 })
+
+test('event callback failures do not alter execution status', async () => {
+  const originalError = console.error
+  console.error = () => {}
+  const scheduler = new Scheduler('events', { enabled: true, onEvent: () => { throw new Error('observer failed') } }, { persistent: false, execute: async () => success() })
+  try {
+    await scheduler.start()
+    const job = await scheduler.create({ name: 'job', prompt: 'work', cron: '* * * * *' })
+    await scheduler.runNow(job.id); await scheduler.whenIdle()
+    assert.equal((await scheduler.get(job.id))?.runs[0].status, 'succeeded')
+  } finally { console.error = originalError; await scheduler.close() }
+})

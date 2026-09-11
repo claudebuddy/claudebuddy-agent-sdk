@@ -38,6 +38,10 @@ test('one-shot creation rejects timestamps in the past', () => {
     () => validateScheduleInput({ name: 'x', prompt: 'p', runAt: '2020-01-01T00:00:00.000Z' }),
     /future/,
   )
+  assert.throws(
+    () => validateScheduleInput({ name: 'x', prompt: 'p', runAt: 'September 12, 2027' }),
+    /ISO 8601/,
+  )
 })
 
 test('next cron occurrence honors the configured IANA time zone', () => {

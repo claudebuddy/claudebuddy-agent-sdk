@@ -34,6 +34,7 @@ import { RunInteraction } from './interaction.js'
 import type { UserMessageReceipt, QuestionAnswer, PendingQuestion } from './types.js'
 import { QueryEngine } from './engine.js'
 import { getAllBaseTools, filterTools } from './tools/index.js'
+import { setSessionScheduler } from './tools/cron-tools.js'
 import { clearTasks, getAllTasks, settleTaskGroup } from './tools/task-tools.js'
 import { connectMCPServer, type MCPConnection } from './mcp/client.js'
 import { setMcpConnections } from './tools/mcp-resource-tools.js'
@@ -214,6 +215,9 @@ export class Agent {
       pool = raw as ToolDefinition[]
     }
 
+    const schedulerTools = new Set(['CronCreate', 'CronList', 'CronGet', 'CronUpdate', 'CronRun', 'CronDelete'])
+    pool = pool.filter(tool => tool.name !== 'RemoteTrigger' && (this.cfg.scheduler?.enabled || !schedulerTools.has(tool.name)))
+    if (this.cfg.scheduler?.enabled) pool = pool.map(tool => schedulerTools.has(tool.name) ? { ...tool, isEnabled: () => true } : tool)
     return filterTools(pool, this.cfg.allowedTools, this.cfg.disallowedTools)
   }
 
@@ -276,6 +280,7 @@ export class Agent {
         execute: (job, signal) => this.executeScheduledJob(job, signal),
       })
       await this.scheduler.start()
+      setSessionScheduler(this.scheduler, this.sessionState)
     }
   }
 

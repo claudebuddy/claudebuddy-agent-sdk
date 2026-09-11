@@ -133,7 +133,10 @@ export {
   // Scheduling
   CronCreateTool,
   CronDeleteTool,
+  CronGetTool,
   CronListTool,
+  CronRunTool,
+  CronUpdateTool,
   RemoteTriggerTool,
 
   // LSP
@@ -366,12 +369,6 @@ export type { GoalReport } from './tools/update-goal.js'
 export {
   setMcpConnections,
 } from './tools/mcp-resource-tools.js'
-
-export {
-  getAllCronJobs,
-  clearCronJobs,
-} from './tools/cron-tools.js'
-export type { CronJob } from './tools/cron-tools.js'
 
 export {
   getConfig,

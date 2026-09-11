@@ -51,7 +51,7 @@ import { ToolSearchTool } from './tool-search.js'
 import { ListMcpResourcesTool, ReadMcpResourceTool } from './mcp-resource-tools.js'
 
 // Scheduling
-import { CronCreateTool, CronDeleteTool, CronListTool, RemoteTriggerTool } from './cron-tools.js'
+import { CronCreateTool, CronDeleteTool, CronGetTool, CronListTool, CronRunTool, CronUpdateTool, RemoteTriggerTool } from './cron-tools.js'
 
 // LSP
 import { LSPTool } from './lsp-tool.js'
@@ -117,7 +117,10 @@ function allTools(): ToolDefinition[] { return [
   // Scheduling
   CronCreateTool,
   CronDeleteTool,
+  CronGetTool,
   CronListTool,
+  CronRunTool,
+  CronUpdateTool,
   RemoteTriggerTool,
 
   // LSP
@@ -224,7 +227,10 @@ export {
   // Scheduling
   CronCreateTool,
   CronDeleteTool,
+  CronGetTool,
   CronListTool,
+  CronRunTool,
+  CronUpdateTool,
   RemoteTriggerTool,
   // LSP
   LSPTool,

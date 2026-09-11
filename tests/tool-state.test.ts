@@ -5,7 +5,6 @@ import { TeamCreateTool, getAllTeams } from '../src/tools/team-tools.js'
 import { ConfigTool, getConfig } from '../src/tools/config-tool.js'
 import { TodoWriteTool, getTodos } from '../src/tools/todo-tool.js'
 import { EnterPlanModeTool, isPlanModeActive } from '../src/tools/plan-tools.js'
-import { CronCreateTool, getAllCronJobs } from '../src/tools/cron-tools.js'
 import { SendMessageTool, readMailbox } from '../src/tools/send-message.js'
 import { filterTools } from '../src/tools/index.js'
 import * as goal from '../src/tools/update-goal.js'
@@ -18,14 +17,12 @@ test('mutable tools and counters are isolated by session, with explicit sharing'
  await ConfigTool.call({action:'set',key:'secret',value:42},a)
  await TodoWriteTool.call({action:'add',text:'private'},a)
  await EnterPlanModeTool.call({},a)
- await CronCreateTool.call({name:'private',schedule:'* * * * *',command:'noop'},a)
  await SendMessageTool.call({to:'peer',content:'private'},a)
  assert.equal(getAllTasks(b.sessionState).length,0)
  assert.equal(getAllTeams(b.sessionState).length,0)
  assert.equal(getConfig('secret',b.sessionState),undefined)
  assert.equal(getTodos(b.sessionState).length,0)
  assert.equal(isPlanModeActive(b.sessionState),false)
- assert.equal(getAllCronJobs(b.sessionState).length,0)
  assert.equal(readMailbox('peer',b.sessionState).length,0)
  assert.equal(getAllTasks(a.sessionState)[0].subject,'secret')
  assert.equal(readMailbox('peer',a.sessionState)[0].content,'private')

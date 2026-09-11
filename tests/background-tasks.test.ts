@@ -110,5 +110,5 @@ test('disabled scheduler placeholders are not advertised to the model', async ()
   } } })
   for await (const event of engine.submitMessage('test')) {}
   assert.ok(names.includes('Bash')); assert.ok(names.includes('Agent'))
-  for (const name of ['CronCreate', 'CronDelete', 'CronList', 'RemoteTrigger']) assert.ok(!names.includes(name))
+  for (const name of ['CronCreate', 'CronDelete', 'CronGet', 'CronList', 'CronRun', 'CronUpdate', 'RemoteTrigger']) assert.ok(!names.includes(name))
 })

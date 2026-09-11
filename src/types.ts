@@ -388,6 +388,8 @@ export interface ModelInfo {
 export interface AgentOptions {
   /** LLM model ID */
   model?: string
+  /** Opt-in in-process prompt scheduler. */
+  scheduler?: import('./scheduler/types.js').SchedulerOptions
   /**
    * API type: 'anthropic-messages' or 'openai-completions'.
    * Falls back to CLAUDEBUDDY_API_TYPE env var. Default: 'anthropic-messages'.

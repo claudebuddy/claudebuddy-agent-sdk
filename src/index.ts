@@ -458,3 +458,13 @@ export type { ProviderStreamEvent } from './providers/types.js'
 
 export type { UserMessageReceipt, QuestionRequest, PendingQuestion, QuestionAnswer, SDKInteractionMessage } from './types.js'
 export type { QuestionHandler } from './tools/ask-user.js'
+export type {
+  SchedulerOptions,
+  ScheduleInput,
+  SchedulePatch,
+  ScheduledJob,
+  ScheduledRun,
+  SchedulerEvent,
+  SchedulerEventType,
+} from './scheduler/types.js'
+export { normalizeSchedulerOptions, validateScheduleInput, nextCronOccurrence } from './scheduler/schedule.js'
